@@ -2,35 +2,68 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   nullable: boolean;
-  /** DuckDB key column: e.g. "PRI", "UNI", or empty */
   key?: string | null;
+}
+
+export type ConnectorType =
+  | "local_file"
+  | "sqlite"
+  | "duckdb"
+  | "postgresql"
+  | "snowflake"
+  | "s3"
+  | "gcs"
+  | "r2";
+
+export interface ConnectorConfig {
+  path?: string | null;
+  format?: string | null;
+  bucket?: string | null;
+  region?: string | null;
+  endpoint?: string | null;
+  prefix?: string | null;
+  account_id?: string | null;
+  host?: string | null;
+  port?: number | null;
+  database?: string | null;
+  user?: string | null;
+}
+
+export interface Connector {
+  id: string;
+  name: string;
+  connector_type: ConnectorType;
+  config: ConnectorConfig;
+  alias?: string | null;
+}
+
+export interface CatalogEntry {
+  schema: string | null;
+  name: string;
+  entry_type: "table" | "view" | "file";
+  columns: ColumnInfo[];
+  row_count: number | null;
 }
 
 export interface DataSource {
   id: string;
   name: string;
-  view_name: string;
-  path: string;
-  source_type: string;
-  format: string;
+  connector_id: string;
+  qualified_name: string;
+  view_name?: string | null;
   schema: ColumnInfo[];
   row_count: number | null;
-  connection_id: string | null;
-  /** "view" = view over file; "table" = materialized */
   kind?: string;
-  /** User-chosen primary key column name (metadata) */
   primary_key_column?: string | null;
 }
 
+/** @deprecated Use Connector instead — kept for backward compatibility in cloud_connector commands */
 export interface ConnectionInfo {
   id: string;
   name: string;
-  provider: string;
-  endpoint: string | null;
-  bucket: string;
-  region: string;
-  prefix: string | null;
-  account_id?: string | null;
+  connector_type: ConnectorType;
+  config: ConnectorConfig;
+  alias?: string | null;
 }
 
 export interface FilePreview {
@@ -48,7 +81,7 @@ export interface QueryResult {
 export interface AppError {
   error: true;
   message: string;
-  code: "FILE_ERROR" | "QUERY_ERROR" | "AUTH_ERROR" | "EXPORT_ERROR";
+  code: "FILE_ERROR" | "QUERY_ERROR" | "AUTH_ERROR" | "EXPORT_ERROR" | "CONNECTOR_ERROR";
 }
 
 export interface PaginationState {
@@ -66,7 +99,6 @@ export interface Settings {
   streaming_threshold: number | null;
 }
 
-/** Persisted tab (data or query) – matches backend PersistedTab */
 export type PersistedTab =
   | { id: string; type: "data"; dataSourceId: string; viewMode?: string }
   | { id: string; type: "query"; name: string; initialSql?: string; autoExecute?: boolean };

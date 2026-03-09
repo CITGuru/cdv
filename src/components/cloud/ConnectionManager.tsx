@@ -10,7 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { ConnectionInfo } from "@/lib/types";
+import type { Connector } from "@/lib/types";
 import type { ParsedError } from "@/lib/errors";
 import { extractError } from "@/lib/errors";
 import { ErrorDisplay } from "@/components/shared/ErrorDisplay";
@@ -25,7 +25,7 @@ const PROVIDERS: { value: ConnectionProvider; label: string }[] = [
 
 interface ConnectionManagerProps {
   onClose: () => void;
-  onCreated: (conn: ConnectionInfo) => void;
+  onCreated: (conn: Connector) => void;
 }
 
 export function ConnectionManager({ onClose, onCreated }: ConnectionManagerProps) {

@@ -4,7 +4,7 @@ import type { editor as monacoEditor, IDisposable, Position } from "monaco-edito
 import { Play, Loader2, Keyboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import type { DataSource } from "@/lib/types";
+import type { DataSource, Connector, CatalogEntry } from "@/lib/types";
 
 interface QueryEditorProps {
   initialSql?: string;
@@ -12,6 +12,8 @@ interface QueryEditorProps {
   onExecute: (sql: string) => void;
   onSqlChange?: (sql: string) => void;
   dataSources?: DataSource[];
+  connectors?: Connector[];
+  catalogs?: Record<string, CatalogEntry[]>;
 }
 
 function quoteIfNeeded(name: string): string {
@@ -23,7 +25,7 @@ const DOT_RE = /\b"?(\w+)"?\.\s*("?)(\w*)$/im;
 const COLUMN_CONTEXT_RE = /(?:\b(?:SELECT|WHERE|AND|OR|ON|SET|HAVING|BY)\s+|,\s*)\w*$/im;
 const REFERENCED_TABLES_RE = /\b(?:FROM|JOIN)\s+"?(\w+)"?/gim;
 
-export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataSources = [] }: QueryEditorProps) {
+export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataSources = [], connectors: _connectors = [], catalogs: _catalogs = {} }: QueryEditorProps) {
   const [sql, setSql] = useState(initialSql ?? "SELECT * FROM ");
   const completionDisposableRef = useRef<IDisposable | null>(null);
   const dataSourcesRef = useRef(dataSources);
@@ -100,7 +102,8 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
           if (dotMatch) {
             const tableName = dotMatch[1];
             const ds = sources.find(
-              (s) => s.view_name.toLowerCase() === tableName.toLowerCase()
+              (s) => (s.view_name ?? "").toLowerCase() === tableName.toLowerCase() ||
+                     s.name.toLowerCase() === tableName.toLowerCase()
             );
             if (ds) {
               return {
@@ -118,17 +121,16 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
           }
 
           if (FROM_JOIN_RE.test(textUntilPosition)) {
-            return {
-              suggestions: sources.map((ds, i) => ({
-                label: ds.view_name,
-                kind: monaco.languages.CompletionItemKind.Struct,
-                insertText: `"${ds.view_name}"`,
-                detail: `${ds.name} (${ds.format})`,
-                documentation: ds.schema.map((c) => `${c.name}: ${c.data_type}`).join("\n"),
-                sortText: String(i).padStart(4, "0"),
-                range: replaceRange,
-              })),
-            };
+            const suggestions: any[] = sources.map((ds, i) => ({
+              label: ds.view_name ?? ds.name,
+              kind: monaco.languages.CompletionItemKind.Struct,
+              insertText: ds.qualified_name,
+              detail: ds.name,
+              documentation: ds.schema.map((c) => `${c.name}: ${c.data_type}`).join("\n"),
+              sortText: String(i).padStart(4, "0"),
+              range: replaceRange,
+            }));
+            return { suggestions };
           }
 
           if (COLUMN_CONTEXT_RE.test(textUntilPosition)) {
@@ -139,7 +141,8 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
             while ((m = re.exec(fullText)) !== null) {
               const tbl = m[1];
               const ds = sources.find(
-                (s) => s.view_name.toLowerCase() === tbl.toLowerCase()
+                (s) => (s.view_name ?? "").toLowerCase() === tbl.toLowerCase() ||
+                       s.name.toLowerCase() === tbl.toLowerCase()
               );
               if (ds && !referencedTables.some((r) => r.id === ds.id)) {
                 referencedTables.push(ds);
@@ -153,12 +156,13 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
             for (const ds of referencedTables) {
               for (let i = 0; i < ds.schema.length; i++) {
                 const col = ds.schema[i];
-                const key = multiTable ? `${ds.view_name}.${col.name}` : col.name;
+                const dsLabel = ds.view_name ?? ds.name;
+                const key = multiTable ? `${dsLabel}.${col.name}` : col.name;
                 if (seen.has(key)) continue;
                 seen.add(key);
                 suggestions.push({
                   label: multiTable
-                    ? { label: col.name, description: ds.view_name }
+                    ? { label: col.name, description: dsLabel }
                     : col.name,
                   kind: monaco.languages.CompletionItemKind.Field,
                   insertText: quoteIfNeeded(col.name),

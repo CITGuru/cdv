@@ -10,61 +10,99 @@ pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
     pub nullable: bool,
-    /// DuckDB DESCRIBE "key" column: e.g. "PRI", "UNI", or empty
     #[serde(default)]
     pub key: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum ConnectorType {
+    #[serde(rename = "local_file")]
+    LocalFile,
+    #[serde(rename = "sqlite")]
+    SQLite,
+    #[serde(rename = "duckdb")]
+    DuckDB,
+    #[serde(rename = "postgresql")]
+    PostgreSQL,
+    #[serde(rename = "snowflake")]
+    Snowflake,
+    #[serde(rename = "s3")]
+    S3,
+    #[serde(rename = "gcs")]
+    GCS,
+    #[serde(rename = "r2")]
+    R2,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ConnectorConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip)]
+    pub password: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Connector {
+    pub id: String,
+    pub name: String,
+    pub connector_type: ConnectorType,
+    pub config: ConnectorConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip)]
+    pub secret_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CatalogEntry {
+    pub schema: Option<String>,
+    pub name: String,
+    pub entry_type: String,
+    pub columns: Vec<ColumnInfo>,
+    pub row_count: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DataSource {
     pub id: String,
     pub name: String,
-    pub view_name: String,
-    pub path: String,
-    pub source_type: String,
-    pub format: String,
+    pub connector_id: String,
+    pub qualified_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_name: Option<String>,
     pub schema: Vec<ColumnInfo>,
     pub row_count: Option<u64>,
-    pub connection_id: Option<String>,
-    /// "view" = view over file; "table" = materialized table
     #[serde(default = "default_kind")]
     pub kind: String,
-    /// User-chosen primary key column name (metadata; e.g. for row identity or future PK constraint)
     #[serde(default)]
     pub primary_key_column: Option<String>,
 }
 
 fn default_kind() -> String {
     "view".to_string()
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub struct ConnectionInfo {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub endpoint: Option<String>,
-    pub bucket: String,
-    pub region: String,
-    pub prefix: Option<String>,
-    pub account_id: Option<String>,
-    #[serde(skip_serializing)]
-    pub secret_name: String,
-}
-
-impl ConnectionInfo {
-    pub fn to_record(&self) -> crate::catalog::ConnectionRecord {
-        crate::catalog::ConnectionRecord {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            provider: self.provider.clone(),
-            endpoint: self.endpoint.clone(),
-            bucket: self.bucket.clone(),
-            region: self.region.clone(),
-            prefix: self.prefix.clone(),
-            account_id: self.account_id.clone(),
-        }
-    }
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -78,7 +116,7 @@ pub struct FilePreview {
 pub struct AppState {
     pub conn: Mutex<Connection>,
     pub data_sources: Mutex<HashMap<String, DataSource>>,
-    pub connections: Mutex<HashMap<String, ConnectionInfo>>,
+    pub connectors: Mutex<HashMap<String, Connector>>,
     pub catalog_path: PathBuf,
     pub settings_path: PathBuf,
     #[allow(clippy::type_complexity)]
@@ -86,7 +124,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates in-memory state (for tests or when paths not yet available).
     pub fn new_in_memory() -> Self {
         let conn =
             Connection::open_in_memory().expect("Failed to open DuckDB in-memory connection");
@@ -95,14 +132,13 @@ impl AppState {
         AppState {
             conn: Mutex::new(conn),
             data_sources: Mutex::new(HashMap::new()),
-            connections: Mutex::new(HashMap::new()),
+            connectors: Mutex::new(HashMap::new()),
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
         }
     }
 
-    /// Creates state with persistent DuckDB and paths for catalog/settings.
     pub fn new_persistent(
         db_path: PathBuf,
         catalog_path: PathBuf,
@@ -116,7 +152,7 @@ impl AppState {
         Ok(AppState {
             conn: Mutex::new(conn),
             data_sources: Mutex::new(HashMap::new()),
-            connections: Mutex::new(HashMap::new()),
+            connectors: Mutex::new(HashMap::new()),
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),

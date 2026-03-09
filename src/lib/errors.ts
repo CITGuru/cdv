@@ -6,6 +6,7 @@ export type ErrorCategory =
   | "file_error"
   | "auth_error"
   | "export_error"
+  | "connector_error"
   | "unknown";
 
 export interface ParsedError {
@@ -171,6 +172,23 @@ function classifyError(
         "Verify your access key and secret key are correct",
         "Check that the bucket name, region, and endpoint are correct",
         "Ensure your credentials have read access to the target bucket",
+      ],
+    };
+  }
+
+  if (
+    code === "CONNECTOR_ERROR" ||
+    lower.includes("failed to attach") ||
+    lower.includes("failed to load") && lower.includes("extension") ||
+    lower.includes("connector")
+  ) {
+    return {
+      category: "connector_error",
+      title: "Connector Error",
+      suggestions: [
+        "Check your connection settings (host, port, credentials)",
+        "Ensure the target database or file is accessible",
+        "The required DuckDB extension may need network access to install",
       ],
     };
   }

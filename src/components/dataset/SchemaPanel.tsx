@@ -18,6 +18,13 @@ interface SchemaPanelProps {
 export function SchemaPanel({ dataset }: SchemaPanelProps) {
   const [collapsed, setCollapsed] = useState(true);
 
+  const displayRef = dataset.view_name ?? dataset.qualified_name;
+  const kindBadge = dataset.kind === "external"
+    ? "EXTERNAL"
+    : dataset.kind === "table"
+    ? "TABLE"
+    : "VIEW";
+
   return (
     <div className="border-b border-border bg-card shrink-0">
       <button
@@ -32,10 +39,10 @@ export function SchemaPanel({ dataset }: SchemaPanelProps) {
           )}
           <span className="font-medium">{dataset.name}</span>
           <Badge variant="secondary" className="font-mono text-[10px]">
-            {dataset.view_name}
+            {displayRef}
           </Badge>
           <Badge variant="outline" className="font-mono text-[10px]">
-            {dataset.format.toUpperCase()}
+            {kindBadge}
           </Badge>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground">

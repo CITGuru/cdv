@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::catalog;
 use crate::error::AppError;
-use crate::state::{AppState, ConnectionInfo};
+use crate::state::{AppState, Connector, ConnectorConfig, ConnectorType};
 
 #[tauri::command]
 pub fn create_connection(
@@ -17,125 +17,81 @@ pub fn create_connection(
     prefix: Option<String>,
     account_id: Option<String>,
     state: State<'_, AppState>,
-) -> Result<ConnectionInfo, AppError> {
-    let conn = state.conn.lock();
-
-    conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
-        .map_err(|e| AppError::AuthError(format!("Failed to load HTTPFS: {}", e)))?;
+) -> Result<Connector, AppError> {
+    let ct = match provider.as_str() {
+        "gcp" => ConnectorType::GCS,
+        "cloudflare" => ConnectorType::R2,
+        _ => ConnectorType::S3,
+    };
 
     let id = uuid::Uuid::new_v4().to_string();
-    let secret_name = format!("cdv_{}", id.replace("-", "_"));
+    let secret_name = format!("cdv_{}", id.replace('-', "_"));
 
-    let parts: Vec<String> = match provider.as_str() {
-        "gcp" => {
-            let scope = format!("gcs://{}", bucket);
-            vec![
-                "TYPE GCS".to_string(),
-                format!("KEY_ID '{}'", access_key),
-                format!("SECRET '{}'", secret_key),
-                format!("SCOPE '{}'", scope),
-            ]
-        }
-        "cloudflare" => {
-            let account = account_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-                AppError::AuthError("Cloudflare R2 requires Account ID".to_string())
-            })?;
-            vec![
-                "TYPE R2".to_string(),
-                format!("ACCOUNT_ID '{}'", account),
-                format!("KEY_ID '{}'", access_key),
-                format!("SECRET '{}'", secret_key),
-                format!("REGION '{}'", if region.is_empty() { "auto" } else { region.as_str() }),
-            ]
-        }
-        _ => {
-            // s3 or s3-compatible
-            let scope = format!("s3://{}", bucket);
-            let mut parts = vec![
-                "TYPE S3".to_string(),
-                format!("KEY_ID '{}'", access_key),
-                format!("SECRET '{}'", secret_key),
-                format!("REGION '{}'", if region.is_empty() { "us-east-1" } else { region.as_str() }),
-                format!("SCOPE '{}'", scope),
-            ];
-            if let Some(ep) = &endpoint {
-                if !ep.is_empty() {
-                    parts.push(format!("ENDPOINT '{}'", ep));
-                    parts.push("URL_STYLE 'path'".to_string());
-                }
-            }
-            parts
-        }
-    };
-
-    let secret_sql = format!(
-        "CREATE SECRET \"{}\" ({})",
-        secret_name,
-        parts.join(", ")
-    );
-
-    conn.execute_batch(&secret_sql)
-        .map_err(|e| AppError::AuthError(format!("Failed to create secret: {}", e)))?;
-
-    let connection = ConnectionInfo {
+    let connector = Connector {
         id: id.clone(),
         name,
-        provider: provider.to_lowercase(),
-        endpoint,
-        bucket,
-        region,
-        prefix,
-        account_id,
-        secret_name,
+        connector_type: ct,
+        config: ConnectorConfig {
+            bucket: Some(bucket),
+            region: Some(region),
+            endpoint,
+            prefix,
+            account_id,
+            user: Some(access_key.clone()),
+            password: Some(secret_key.clone()),
+            ..Default::default()
+        },
+        alias: None,
+        secret_name: Some(secret_name.clone()),
     };
 
+    let ops = crate::connector::get_ops(&connector.connector_type);
+    let conn = state.conn.lock();
+    ops.activate(&conn, &connector)?;
     drop(conn);
-    state.connections.lock().insert(id.clone(), connection.clone());
 
-    let catalog = catalog::catalog_from_state(
-        &*state.data_sources.lock(),
-        &*state.connections.lock(),
-    );
-    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+    state
+        .connectors
+        .lock()
+        .insert(id.clone(), connector.clone());
+    catalog::save_state_catalog(&state);
 
-    Ok(connection)
+    Ok(connector)
 }
 
 #[tauri::command]
 pub fn remove_connection(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    let secret_name = {
-        let mut connections = state.connections.lock();
-        let info = connections
+    let connector = {
+        let mut connectors = state.connectors.lock();
+        connectors
             .remove(&id)
-            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?;
-        info.secret_name
+            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?
     };
 
+    let ops = crate::connector::get_ops(&connector.connector_type);
     let conn = state.conn.lock();
-    conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", secret_name))
-        .map_err(|e| AppError::AuthError(e.to_string()))?;
+    ops.deactivate(&conn, &connector).ok();
     drop(conn);
 
-    let catalog = catalog::catalog_from_state(
-        &*state.data_sources.lock(),
-        &*state.connections.lock(),
-    );
-    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+    catalog::save_state_catalog(&state);
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn list_connections(state: State<'_, AppState>) -> Result<Vec<ConnectionInfo>, AppError> {
-    Ok(state.connections.lock().values().cloned().collect())
-}
-
-fn connection_path_scheme(provider: &str) -> &'static str {
-    if provider == "gcp" {
-        "gcs"
-    } else {
-        "s3" // s3 and cloudflare (R2) use s3:// with their respective secrets
-    }
+pub fn list_connections(state: State<'_, AppState>) -> Result<Vec<Connector>, AppError> {
+    let connectors = state.connectors.lock();
+    let cloud: Vec<Connector> = connectors
+        .values()
+        .filter(|c| {
+            matches!(
+                c.connector_type,
+                ConnectorType::S3 | ConnectorType::GCS | ConnectorType::R2
+            )
+        })
+        .cloned()
+        .collect();
+    Ok(cloud)
 }
 
 #[tauri::command]
@@ -144,20 +100,25 @@ pub fn list_connection_files(
     prefix_override: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, AppError> {
-    let (bucket, default_prefix, provider) = {
-        let connections = state.connections.lock();
-        let info = connections
+    let connector = {
+        let connectors = state.connectors.lock();
+        connectors
             .get(&connection_id)
-            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?;
-        (
-            info.bucket.clone(),
-            info.prefix.clone(),
-            info.provider.clone(),
-        )
+            .cloned()
+            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?
     };
 
-    let scheme = connection_path_scheme(&provider);
-    let prefix = prefix_override.or(default_prefix);
+    let cfg = &connector.config;
+    let bucket = cfg
+        .bucket
+        .as_deref()
+        .ok_or_else(|| AppError::AuthError("Missing bucket".into()))?;
+
+    let scheme = match connector.connector_type {
+        ConnectorType::GCS => "gcs",
+        _ => "s3",
+    };
+    let prefix = prefix_override.or_else(|| cfg.prefix.clone());
     let path = match prefix {
         Some(p) if !p.is_empty() => format!("{}://{}/{}*", scheme, bucket, p),
         _ => format!("{}://{}/*", scheme, bucket),

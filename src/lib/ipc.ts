@@ -2,11 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   DataSource,
   ColumnInfo,
-  ConnectionInfo,
+  Connector,
+  ConnectorType,
+  ConnectorConfig,
+  CatalogEntry,
   FilePreview,
   Settings,
   PersistedWorkspace,
 } from "./types";
+
+// ──── File preview ────
 
 export async function previewFile(
   path: string,
@@ -15,23 +20,25 @@ export async function previewFile(
   return invoke("preview_file", { path, format: format ?? null });
 }
 
+// ──── Data sources ────
+
 export async function createDataSource(params: {
   name: string;
   viewName: string;
-  path: string;
-  format?: string;
-  connectionId?: string;
+  connectorId: string;
   materialize?: boolean;
   primaryKeyColumn?: string | null;
+  dbSchema?: string;
+  dbTable?: string;
 }): Promise<DataSource> {
   return invoke("create_data_source", {
     name: params.name,
     viewName: params.viewName,
-    path: params.path,
-    format: params.format ?? null,
-    connectionId: params.connectionId ?? null,
+    connectorId: params.connectorId,
     materialize: params.materialize ?? null,
     primaryKeyColumn: params.primaryKeyColumn ?? null,
+    dbSchema: params.dbSchema ?? null,
+    dbTable: params.dbTable ?? null,
   });
 }
 
@@ -42,20 +49,14 @@ export async function removeDataSource(id: string): Promise<void> {
 export async function updateDataSource(
   id: string,
   params: {
-    path: string;
     name?: string;
     viewName?: string;
-    format?: string;
-    connectionId?: string;
   }
 ): Promise<DataSource> {
   return invoke("update_data_source", {
     id,
-    path: params.path,
     name: params.name ?? null,
-    view_name: params.viewName ?? null,
-    format: params.format ?? null,
-    connection_id: params.connectionId ?? null,
+    viewName: params.viewName ?? null,
   });
 }
 
@@ -70,6 +71,8 @@ export async function getSchema(datasetId: string): Promise<ColumnInfo[]> {
 export async function getPreview(datasetId: string): Promise<number[]> {
   return invoke("get_preview", { datasetId });
 }
+
+// ──── Query engine ────
 
 export async function runQuery(sql: string): Promise<number[]> {
   return invoke("run_query", { sql });
@@ -87,6 +90,52 @@ export async function streamQuery(sql: string): Promise<void> {
   return invoke("stream_query", { sql });
 }
 
+// ──── Connectors ────
+
+export async function addConnector(params: {
+  name: string;
+  connectorType: ConnectorType;
+  config: ConnectorConfig;
+  accessKey?: string;
+  secretKey?: string;
+}): Promise<Connector> {
+  return invoke("add_connector", {
+    name: params.name,
+    connectorType: params.connectorType,
+    config: params.config,
+    accessKey: params.accessKey ?? null,
+    secretKey: params.secretKey ?? null,
+  });
+}
+
+export async function removeConnector(id: string): Promise<void> {
+  return invoke("remove_connector", { id });
+}
+
+export async function testConnector(params: {
+  connectorType: ConnectorType;
+  config: ConnectorConfig;
+  accessKey?: string;
+  secretKey?: string;
+}): Promise<void> {
+  return invoke("test_connector", {
+    connectorType: params.connectorType,
+    config: params.config,
+    accessKey: params.accessKey ?? null,
+    secretKey: params.secretKey ?? null,
+  });
+}
+
+export async function introspectConnector(id: string): Promise<CatalogEntry[]> {
+  return invoke("introspect_connector", { id });
+}
+
+export async function listConnectors(): Promise<Connector[]> {
+  return invoke("list_connectors");
+}
+
+// ──── Cloud connections (legacy compatibility wrappers) ────
+
 export type ConnectionProvider = "s3" | "gcp" | "cloudflare";
 
 export async function createConnection(params: {
@@ -98,8 +147,8 @@ export async function createConnection(params: {
   accessKey: string;
   secretKey: string;
   prefix?: string;
-  accountId?: string; // Cloudflare R2
-}): Promise<ConnectionInfo> {
+  accountId?: string;
+}): Promise<Connector> {
   return invoke("create_connection", {
     name: params.name,
     provider: params.provider,
@@ -117,7 +166,7 @@ export async function removeConnection(id: string): Promise<void> {
   return invoke("remove_connection", { id });
 }
 
-export async function listConnections(): Promise<ConnectionInfo[]> {
+export async function listConnections(): Promise<Connector[]> {
   return invoke("list_connections");
 }
 
@@ -131,6 +180,8 @@ export async function listConnectionFiles(
   });
 }
 
+// ──── Export ────
+
 export async function exportData(
   query: string,
   format: string,
@@ -139,6 +190,8 @@ export async function exportData(
   return invoke("export_data", { query, format, outputPath });
 }
 
+// ──── Settings ────
+
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }
@@ -146,6 +199,8 @@ export async function getSettings(): Promise<Settings> {
 export async function setSettings(settings: Settings): Promise<void> {
   return invoke("set_settings", { settings });
 }
+
+// ──── Workspace ────
 
 export async function getPersistedTabs(): Promise<PersistedWorkspace> {
   return invoke("get_persisted_tabs");

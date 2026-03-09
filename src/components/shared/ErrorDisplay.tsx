@@ -66,6 +66,12 @@ const CATEGORY_CONFIG: Record<
     bg: "bg-red-500/10",
     border: "border-red-500/30",
   },
+  connector_error: {
+    icon: AlertCircle,
+    color: "text-orange-400",
+    bg: "bg-orange-500/10",
+    border: "border-orange-500/30",
+  },
   unknown: {
     icon: AlertCircle,
     color: "text-destructive",

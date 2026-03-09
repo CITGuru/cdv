@@ -1,5 +1,6 @@
 mod catalog;
 mod cloud_connector;
+mod connector;
 mod dataset_manager;
 mod error;
 mod export_service;
@@ -40,27 +41,31 @@ pub fn run() {
                 }
             };
 
-            let catalog = catalog::load_catalog(&state.catalog_path);
-            if let Err(e) = dataset_manager::rehydrate_views(&*state.conn.lock(), &catalog.data_sources) {
-                eprintln!("Rehydrate views warning: {}", e);
+            let cat = catalog::load_catalog(&state.catalog_path);
+
+            {
+                let conn = state.conn.lock();
+                for c in &cat.connectors {
+                    let ops = connector::get_ops(&c.connector_type);
+                    if let Err(e) = ops.activate(&conn, c) {
+                        eprintln!("Failed to activate connector '{}': {}", c.name, e);
+                    }
+                }
+
+                if let Err(e) = {
+                    let connector_map: std::collections::HashMap<String, state::Connector> =
+                        cat.connectors.iter().map(|c| (c.id.clone(), c.clone())).collect();
+                    dataset_manager::rehydrate_views(&conn, &cat.data_sources, &connector_map)
+                } {
+                    eprintln!("Rehydrate views warning: {}", e);
+                }
             }
-            for ds in catalog.data_sources {
+
+            for c in cat.connectors {
+                state.connectors.lock().insert(c.id.clone(), c);
+            }
+            for ds in cat.data_sources {
                 state.data_sources.lock().insert(ds.id.clone(), ds);
-            }
-            for rec in catalog.connections {
-                let secret_name = format!("cdv_{}", rec.id.replace("-", "_"));
-                let info = state::ConnectionInfo {
-                    id: rec.id.clone(),
-                    name: rec.name,
-                    provider: rec.provider,
-                    endpoint: rec.endpoint,
-                    bucket: rec.bucket,
-                    region: rec.region,
-                    prefix: rec.prefix,
-                    account_id: rec.account_id,
-                    secret_name,
-                };
-                state.connections.lock().insert(rec.id, info);
             }
 
             app.manage(state);
@@ -81,6 +86,11 @@ pub fn run() {
             cloud_connector::remove_connection,
             cloud_connector::list_connections,
             cloud_connector::list_connection_files,
+            connector::add_connector,
+            connector::remove_connector,
+            connector::test_connector,
+            connector::introspect_connector,
+            connector::list_connectors,
             export_service::export_data,
             settings::get_settings,
             settings::set_settings,

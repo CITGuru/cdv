@@ -93,7 +93,7 @@ export function useDataset() {
 
     setLoading(true);
     try {
-      const sql = `SELECT * FROM "${ds.view_name}"`;
+      const sql = `SELECT * FROM ${ds.qualified_name}`;
       const ipcData = await runPaginatedQuery(sql, initialPage, initialPageSize);
       const result = decodeArrowIPC(ipcData);
       resultCache.current.set(key, result);
@@ -143,7 +143,7 @@ export function useDataset() {
       setLoading(true);
       setError(null);
       try {
-        const sql = `SELECT * FROM "${activeSource.view_name}"`;
+        const sql = `SELECT * FROM ${activeSource.qualified_name}`;
         const ipcData = await runPaginatedQuery(sql, page, pagination.pageSize);
         const result = decodeArrowIPC(ipcData);
         resultCache.current.set(key, result);
@@ -182,7 +182,7 @@ export function useDataset() {
       setLoading(true);
       setError(null);
       try {
-        const sql = `SELECT * FROM "${activeSource.view_name}"`;
+        const sql = `SELECT * FROM ${activeSource.qualified_name}`;
         const ipcData = await runPaginatedQuery(sql, 0, pageSize);
         const result = decodeArrowIPC(ipcData);
         resultCache.current.set(key, result);

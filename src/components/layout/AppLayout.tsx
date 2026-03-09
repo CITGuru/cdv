@@ -17,20 +17,31 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useDataset } from "@/hooks/useDataset";
 import { useSettings } from "@/hooks/useSettings";
 import { useQueryEngine } from "@/hooks/useQuery";
 import { useWorkspaceTabs } from "@/hooks/useWorkspaceTabs";
+import { useConnectors } from "@/hooks/useConnectors";
 import type { DataTab, QueryTab, ViewMode, WorkspaceTab } from "@/hooks/useWorkspaceTabs";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   listDataSources,
-  listConnections,
   getPersistedTabs,
   setPersistedTabs,
   removeDataSource as removeDataSourceIpc,
-  removeConnection as removeConnectionIpc,
+  createDataSource as createDataSourceIpc,
+  addConnector as addConnectorIpc,
 } from "@/lib/ipc";
-import type { DataSource, ConnectionInfo } from "@/lib/types";
+import type { DataSource, Connector } from "@/lib/types";
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 480;
@@ -40,13 +51,14 @@ export function AppLayout() {
   const settings = useSettings();
   const queryEngine = useQueryEngine();
   const tabs = useWorkspaceTabs();
+  const connectorsHook = useConnectors();
   const [showAddSource, setShowAddSource] = useState(false);
+  const [showAddFromUrl, setShowAddFromUrl] = useState(false);
   const [showConnections, setShowConnections] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [exportQuery, setExportQuery] = useState("");
   const [querySql, setQuerySql] = useState("");
-  const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [dropFilePath, setDropFilePath] = useState<string | undefined>();
   const [showProperties, setShowProperties] = useState<DataSource | null>(null);
   const [showImportFor, setShowImportFor] = useState<DataSource | null>(null);
@@ -101,6 +113,7 @@ export function AppLayout() {
   }, []);
 
   useEffect(() => {
+    connectorsHook.loadConnectors();
     listDataSources()
       .then((sources) => {
         dataset.setDataSources(sources);
@@ -118,9 +131,6 @@ export function AppLayout() {
           hasHydratedTabsRef.current = true;
         }
       })
-      .catch(() => {});
-    listConnections()
-      .then((conns) => setConnections(conns))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -184,34 +194,34 @@ export function AppLayout() {
 
   const handleNewQuery = useCallback(
     (ds: DataSource) => {
-      tabs.openQueryTab(`SELECT * FROM "${ds.view_name}" LIMIT 100`);
-      setQuerySql(`SELECT * FROM "${ds.view_name}" LIMIT 100`);
+      const ref = ds.qualified_name;
+      tabs.openQueryTab(`SELECT * FROM ${ref} LIMIT 100`);
+      setQuerySql(`SELECT * FROM ${ref} LIMIT 100`);
     },
     [tabs]
   );
 
   function buildViewSql(ds: DataSource, viewMode: ViewMode): string {
-    const v = ds.view_name;
+    const ref = ds.qualified_name;
     const total = ds.row_count ?? 0;
     switch (viewMode) {
       case "first100":
-        return `SELECT * FROM "${v}" LIMIT 100`;
+        return `SELECT * FROM ${ref} LIMIT 100`;
       case "last100": {
         const offset = Math.max(0, total - 100);
-        return `SELECT * FROM "${v}" LIMIT 100 OFFSET ${offset}`;
+        return `SELECT * FROM ${ref} LIMIT 100 OFFSET ${offset}`;
       }
       case "all":
-        return `SELECT * FROM "${v}" LIMIT 10000`;
+        return `SELECT * FROM ${ref} LIMIT 10000`;
       case "filtered":
       default:
-        return `SELECT * FROM "${v}" LIMIT 100`;
+        return `SELECT * FROM ${ref} LIMIT 100`;
     }
   }
 
   const handleViewDataAsQuery = useCallback(
     (ds: DataSource, viewMode: ViewMode) => {
-      const ext = ds.format?.trim().toLowerCase() || (ds.path?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? "data");
-      const tabName = `${ds.name}[${ext}]`;
+      const tabName = ds.name;
       const sql = buildViewSql(ds, viewMode);
       setQuerySql(sql);
       tabs.openQueryTab(sql, { autoExecute: true, name: tabName });
@@ -232,9 +242,12 @@ export function AppLayout() {
     [dataset, tabs]
   );
 
-  const handleConnectionCreated = useCallback((conn: ConnectionInfo) => {
-    setConnections((prev) => [...prev, conn]);
-  }, []);
+  const handleConnectionCreated = useCallback((conn: Connector) => {
+    connectorsHook.setConnectors((prev) => {
+      if (prev.find((c) => c.id === conn.id)) return prev;
+      return [...prev, conn];
+    });
+  }, [connectorsHook]);
 
   const handleRemoveDataSource = useCallback(
     async (id: string) => {
@@ -249,22 +262,97 @@ export function AppLayout() {
     [dataset, tabs]
   );
 
-  const handleRemoveConnection = useCallback(async (id: string) => {
+  const handleRemoveConnector = useCallback(async (id: string) => {
     try {
-      await removeConnectionIpc(id);
-      setConnections((prev) => prev.filter((c) => c.id !== id));
+      await connectorsHook.removeConnector(id);
+      const toRemove = dataset.dataSources.filter((ds) => ds.connector_id === id);
+      for (const ds of toRemove) {
+        dataset.removeSource(ds.id);
+        tabs.closeTabsForDataSource(ds.id);
+      }
     } catch {
       // silently fail
     }
-  }, []);
+  }, [connectorsHook, dataset, tabs]);
+
+  const handleRefreshConnector = useCallback(async (id: string) => {
+    await connectorsHook.refreshCatalog(id);
+  }, [connectorsHook]);
 
   const handleOpenAddSource = useCallback(() => {
     setDropFilePath(undefined);
     setShowAddSource(true);
   }, []);
 
+  const handleOpenQueryConsole = useCallback(() => {
+    tabs.openQueryTab();
+  }, [tabs]);
+
+  const handleAddFolder = useCallback(async () => {
+    const paths = await openDialog({
+      multiple: true,
+      filters: [
+        {
+          name: "Data Files",
+          extensions: [
+            "csv",
+            "tsv",
+            "json",
+            "jsonl",
+            "parquet",
+            "xlsx",
+            "avro",
+            "arrow",
+            "ipc",
+          ],
+        },
+      ],
+    });
+    const pathList = Array.isArray(paths) ? paths : paths ? [paths] : [];
+    if (pathList.length === 0) return;
+    const created: DataSource[] = [];
+    for (const p of pathList) {
+      try {
+        const name = p.split(/[/\\]/).pop() ?? "untitled";
+        const viewName = name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+        const ext = (name.match(/\.([^.]+)$/)?.[1] ?? "").toLowerCase();
+        const formatMap: Record<string, string> = {
+          csv: "csv",
+          tsv: "tsv",
+          json: "json",
+          jsonl: "jsonl",
+          parquet: "parquet",
+          xlsx: "xlsx",
+          avro: "avro",
+          arrow: "arrow_ipc",
+          ipc: "arrow_ipc",
+        };
+        const format = formatMap[ext] ?? "csv";
+        const conn = await addConnectorIpc({
+          name: name,
+          connectorType: "local_file",
+          config: { path: p, format },
+        });
+        const ds = await createDataSourceIpc({
+          name,
+          viewName,
+          connectorId: conn.id,
+        });
+        dataset.addDataSource(ds);
+        created.push(ds);
+      } catch {
+        // skip failed file
+      }
+    }
+    if (created.length > 0) tabs.openDataTab(created[0]);
+  }, [dataset, tabs]);
+
+  const handleAddFromUrl = useCallback(() => {
+    setShowAddFromUrl(true);
+  }, []);
+
   const handleExport = useCallback((ds: DataSource) => {
-    setExportQuery(`SELECT * FROM "${ds.view_name}"`);
+    setExportQuery(`SELECT * FROM ${ds.qualified_name}`);
     setShowExport(true);
   }, []);
 
@@ -276,6 +364,34 @@ export function AppLayout() {
     setShowProperties(ds);
   }, []);
 
+  const handleImportDbTable = useCallback(
+    async (connectorId: string, schema: string, tableName: string) => {
+      try {
+        const ds = await createDataSourceIpc({
+          name: tableName,
+          viewName: tableName,
+          connectorId,
+          dbSchema: schema,
+          dbTable: tableName,
+        });
+        dataset.addDataSource(ds);
+        tabs.openDataTab(ds);
+      } catch {
+        // silently fail
+      }
+    },
+    [dataset, tabs]
+  );
+
+  const handleNewQueryFromTable = useCallback(
+    (qualifiedName: string) => {
+      const sql = `SELECT * FROM ${qualifiedName} LIMIT 100`;
+      setQuerySql(sql);
+      tabs.openQueryTab(sql);
+    },
+    [tabs]
+  );
+
   const hasTabs = tabs.openTabs.length > 0;
 
   return (
@@ -285,24 +401,30 @@ export function AppLayout() {
         style={{ width: sidebarWidth, minWidth: sidebarWidth }}
       >
         <Sidebar
-        dataSources={dataset.dataSources}
-        connections={connections}
-        activeSourceId={dataset.activeSource?.id ?? null}
-        queryHistory={queryEngine.history}
-        onAddDataSource={handleOpenAddSource}
-        onDataSourceSelect={handleDataSourceSelect}
-        onDataSourceRemove={handleRemoveDataSource}
-        onAddConnection={() => setShowConnections(true)}
-        onConnectionRemove={handleRemoveConnection}
-        onQuerySelect={handleQuerySelect}
-        onNewQuery={handleNewQuery}
-        onOpenDataTab={handleDataSourceSelect}
-        onViewDataAsQuery={handleViewDataAsQuery}
-        onExport={handleExport}
-        onImport={handleImport}
-        onProperties={handleProperties}
-        onOpenSettings={() => setShowSettings(true)}
-      />
+          dataSources={dataset.dataSources}
+          connectors={connectorsHook.connectors}
+          catalogs={connectorsHook.catalogs}
+          activeSourceId={dataset.activeSource?.id ?? null}
+          queryHistory={queryEngine.history}
+          onAddDataSource={handleOpenAddSource}
+          onOpenQueryConsole={handleOpenQueryConsole}
+          onAddFolder={handleAddFolder}
+          onAddFromUrl={handleAddFromUrl}
+          onDataSourceSelect={handleDataSourceSelect}
+          onDataSourceRemove={handleRemoveDataSource}
+          onConnectorRemove={handleRemoveConnector}
+          onConnectorRefresh={handleRefreshConnector}
+          onQuerySelect={handleQuerySelect}
+          onNewQuery={handleNewQuery}
+          onOpenDataTab={handleDataSourceSelect}
+          onViewDataAsQuery={handleViewDataAsQuery}
+          onExport={handleExport}
+          onImport={handleImport}
+          onProperties={handleProperties}
+          onOpenSettings={() => setShowSettings(true)}
+          onImportDbTable={handleImportDbTable}
+          onNewQueryFromTable={handleNewQueryFromTable}
+        />
       </div>
       <div
         role="separator"
@@ -313,7 +435,6 @@ export function AppLayout() {
         <div className="w-0.5 h-full group-hover:bg-primary/50 transition-colors mx-auto" />
       </div>
       <main className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {/* Tab bar + toolbar */}
         <div className="flex items-center justify-between h-10 border-b border-border bg-card px-2 shrink-0 gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <div className="flex items-center gap-0.5 overflow-x-auto scrollbar-thin min-w-0 flex-1">
@@ -415,7 +536,7 @@ export function AppLayout() {
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  setExportQuery(`SELECT * FROM "${dataset.activeSource!.view_name}"`);
+                  setExportQuery(`SELECT * FROM ${dataset.activeSource!.qualified_name}`);
                   setShowExport(true);
                 }}
                 className="text-xs gap-1.5"
@@ -427,7 +548,6 @@ export function AppLayout() {
           </div>
         </div>
 
-        {/* Content */}
         <div className="flex-1 overflow-hidden">
           {!hasTabs ? (
             <EmptyState onOpenAddSource={handleOpenAddSource} />
@@ -449,6 +569,8 @@ export function AppLayout() {
                   initialSql={activeQueryTab.initialSql ?? querySql}
                   loading={queryEngine.loading}
                   dataSources={dataset.dataSources}
+                  connectors={connectorsHook.connectors}
+                  catalogs={connectorsHook.catalogs}
                   onExecute={(sql) =>
                     queryEngine.executeQuery(sql, {
                       useStreaming: settings.settings.streaming_enabled,
@@ -486,7 +608,9 @@ export function AppLayout() {
           setDropFilePath(undefined);
         }}
         onCreated={handleDataSourceCreated}
-        connections={connections}
+        connectors={connectorsHook.connectors}
+        onAddConnector={connectorsHook.addConnector}
+        onTestConnector={connectorsHook.testConnection}
         initialFilePath={dropFilePath}
         onOpenNewConnection={() => setShowConnections(true)}
       />
@@ -500,7 +624,7 @@ export function AppLayout() {
 
       {showExport && (
         <ExportModal
-          defaultQuery={exportQuery || (dataset.activeSource ? `SELECT * FROM "${dataset.activeSource.view_name}"` : "")}
+          defaultQuery={exportQuery || (dataset.activeSource ? `SELECT * FROM ${dataset.activeSource.qualified_name}` : "")}
           defaultFormat={
             ["csv", "parquet", "json"].includes(settings.settings.default_export_format)
               ? (settings.settings.default_export_format as "csv" | "parquet" | "json")
@@ -513,6 +637,7 @@ export function AppLayout() {
       {showProperties && (
         <PropertiesModal
           dataSource={showProperties}
+          connector={connectorsHook.getConnectorById(showProperties.connector_id)}
           onClose={() => setShowProperties(null)}
         />
       )}
@@ -526,7 +651,9 @@ export function AppLayout() {
             dataset.updateDataSource(ds);
             setShowImportFor(null);
           }}
-          connections={connections}
+          connectors={connectorsHook.connectors}
+          onAddConnector={connectorsHook.addConnector}
+          onTestConnector={connectorsHook.testConnection}
           initialFilePath={undefined}
           onOpenNewConnection={() => setShowConnections(true)}
           existingDataSource={showImportFor}
@@ -541,7 +668,137 @@ export function AppLayout() {
           onUpdate={settings.updateSettings}
         />
       )}
+
+      {showAddFromUrl && (
+        <AddFromUrlDialog
+          onClose={() => setShowAddFromUrl(false)}
+          onCreated={(ds) => {
+            dataset.addDataSource(ds);
+            tabs.openDataTab(ds);
+            setShowAddFromUrl(false);
+          }}
+          onAddConnector={connectorsHook.addConnector}
+        />
+      )}
     </div>
+  );
+}
+
+function AddFromUrlDialog({
+  onClose,
+  onCreated,
+  onAddConnector,
+}: {
+  onClose: () => void;
+  onCreated: (ds: DataSource) => void;
+  onAddConnector: (params: {
+    name: string;
+    connectorType: "local_file";
+    config: { path: string; format?: string };
+  }) => Promise<Connector>;
+}) {
+  const [url, setUrl] = useState("");
+  const [format, setFormat] = useState("csv");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const inferFormatFromUrl = (u: string) => {
+    const pathname = u.split("?")[0];
+    const ext = (pathname.match(/\.([^.]+)$/)?.[1] ?? "").toLowerCase();
+    const map: Record<string, string> = {
+      csv: "csv",
+      tsv: "tsv",
+      json: "json",
+      jsonl: "jsonl",
+      parquet: "parquet",
+      xlsx: "xlsx",
+      avro: "avro",
+    };
+    return map[ext] ?? "csv";
+  };
+
+  const handleUrlChange = (value: string) => {
+    setUrl(value);
+    if (value) setFormat(inferFormatFromUrl(value));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const u = url.trim();
+    if (!u) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const name = u.split("/").pop()?.split("?")[0] ?? "url_source";
+      const viewName = name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase() || "url_source";
+      const conn = await onAddConnector({
+        name,
+        connectorType: "local_file",
+        config: { path: u, format },
+      });
+      const ds = await createDataSourceIpc({
+        name,
+        viewName,
+        connectorId: conn.id,
+      });
+      onCreated(ds);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load from URL");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Data Source from URL</DialogTitle>
+          <DialogDescription>
+            Load a file from an HTTP(S) URL. DuckDB will fetch it (e.g. via httpfs). Supports CSV, JSON, Parquet, and other formats.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="url">URL</Label>
+            <Input
+              id="url"
+              type="url"
+              placeholder="https://example.com/data.csv"
+              value={url}
+              onChange={(e) => handleUrlChange(e.target.value)}
+              disabled={loading}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="format">Format</Label>
+            <Select value={format} onValueChange={setFormat} disabled={loading}>
+              <SelectTrigger id="format">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["csv", "tsv", "json", "jsonl", "parquet", "xlsx", "avro"].map((f) => (
+                  <SelectItem key={f} value={f}>
+                    {f.toUpperCase()}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {error && (
+            <p className="text-sm text-destructive">{error}</p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose} disabled={loading}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={loading || !url.trim()}>
+              {loading ? "Loading…" : "Add"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -565,7 +822,7 @@ function EmptyState({ onOpenAddSource }: { onOpenAddSource: () => void }) {
           Add Data Source
         </Button>
         <p className="text-xs text-muted-foreground">
-          Supports CSV, TSV, JSON, JSONL, Parquet, Arrow IPC
+          Supports CSV, TSV, JSON, JSONL, Parquet, Avro, Arrow IPC, SQLite, PostgreSQL
         </p>
       </div>
     </div>
@@ -574,12 +831,19 @@ function EmptyState({ onOpenAddSource }: { onOpenAddSource: () => void }) {
 
 function PropertiesModal({
   dataSource,
+  connector,
   onClose,
 }: {
   dataSource: DataSource;
+  connector?: Connector;
   onClose: () => void;
 }) {
   const schema = dataSource?.schema ?? [];
+  const connectorLabel = connector
+    ? connector.connector_type === "local_file"
+      ? connector.config.format?.toUpperCase() ?? "File"
+      : connector.connector_type.replace(/_/g, " ").toUpperCase()
+    : "Unknown";
   return (
     <Dialog open={!!dataSource} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="w-[95vw] max-w-6xl sm:max-w-6xl min-h-[60vh] max-h-[90vh] flex flex-col">
@@ -591,12 +855,18 @@ function PropertiesModal({
           <div className="grid grid-cols-[100px_1fr] gap-2 shrink-0">
             <span className="text-muted-foreground">Name</span>
             <span className="font-mono">{dataSource?.name}</span>
-            <span className="text-muted-foreground">View name</span>
-            <span className="font-mono">{dataSource?.view_name}</span>
-            <span className="text-muted-foreground">Path</span>
-            <span className="font-mono break-all">{dataSource?.path}</span>
-            <span className="text-muted-foreground">Format</span>
-            <span>{dataSource?.format}</span>
+            <span className="text-muted-foreground">Qualified name</span>
+            <span className="font-mono">{dataSource?.qualified_name}</span>
+            {dataSource?.view_name && (
+              <>
+                <span className="text-muted-foreground">View name</span>
+                <span className="font-mono">{dataSource.view_name}</span>
+              </>
+            )}
+            <span className="text-muted-foreground">Source</span>
+            <span>{connectorLabel}</span>
+            <span className="text-muted-foreground">Kind</span>
+            <span>{dataSource?.kind}</span>
             <span className="text-muted-foreground">Rows</span>
             <span>{dataSource?.row_count?.toLocaleString() ?? "?"}</span>
           </div>
@@ -639,4 +909,3 @@ function PropertiesModal({
     </Dialog>
   );
 }
-

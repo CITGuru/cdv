@@ -7,9 +7,8 @@ use tauri::State;
 
 use crate::catalog;
 use crate::error::AppError;
-use crate::state::{AppState, ColumnInfo, DataSource, FilePreview};
+use crate::state::{AppState, ColumnInfo, ConnectorType, DataSource, FilePreview};
 
-/// Builds (format_name, duckdb_ref) for rehydration. Path can be local or s3://...
 pub fn build_duckdb_ref(path: &str, format: &str) -> Result<String, AppError> {
     let (_, duckdb_ref) = format_to_ref(path, format)?;
     Ok(duckdb_ref)
@@ -25,7 +24,6 @@ fn detect_format(path: &str) -> Result<(String, String), AppError> {
     format_to_ref(path, &ext)
 }
 
-/// Escape path for use inside single-quoted SQL string (e.g. paths with quotes or backslashes).
 fn escape_path_for_sql(path: &str) -> String {
     path.replace('\\', "\\\\").replace('\'', "''")
 }
@@ -38,11 +36,23 @@ pub(crate) fn format_to_ref(path: &str, format: &str) -> Result<(String, String)
             "tsv".to_string(),
             format!("read_csv_auto('{}', delim='\\t')", path_esc),
         )),
-        "json" => Ok(("json".to_string(), format!("read_json_auto('{}')", path_esc))),
-        "jsonl" => Ok(("jsonl".to_string(), format!("read_json_auto('{}')", path_esc))),
-        "parquet" => Ok(("parquet".to_string(), format!("read_parquet('{}')", path_esc))),
+        "json" => Ok((
+            "json".to_string(),
+            format!("read_json_auto('{}')", path_esc),
+        )),
+        "jsonl" => Ok((
+            "jsonl".to_string(),
+            format!("read_json_auto('{}')", path_esc),
+        )),
+        "parquet" => Ok((
+            "parquet".to_string(),
+            format!("read_parquet('{}')", path_esc),
+        )),
         "xlsx" => Ok(("xlsx".to_string(), format!("read_xlsx('{}')", path_esc))),
-        "arrow" | "ipc" | "arrow_ipc" => Ok(("arrow_ipc".to_string(), format!("'{}'", path_esc))),
+        "avro" => Ok(("avro".to_string(), format!("read_avro('{}')", path_esc))),
+        "arrow" | "ipc" | "arrow_ipc" => {
+            Ok(("arrow_ipc".to_string(), format!("'{}'", path_esc)))
+        }
         _ => Err(AppError::FileError(format!(
             "Unsupported file format: {}",
             format
@@ -50,8 +60,10 @@ pub(crate) fn format_to_ref(path: &str, format: &str) -> Result<(String, String)
     }
 }
 
-/// DuckDB DESCRIBE returns: column_name (0), column_type (1), null (2), key (3), default (4), extra (5).
-fn describe_ref(conn: &Connection, duckdb_ref: &str) -> Result<Vec<ColumnInfo>, AppError> {
+pub(crate) fn describe_ref(
+    conn: &Connection,
+    duckdb_ref: &str,
+) -> Result<Vec<ColumnInfo>, AppError> {
     let sql = format!("DESCRIBE SELECT * FROM {}", duckdb_ref);
     let mut stmt = conn.prepare(&sql)?;
     let schema: Vec<ColumnInfo> = stmt
@@ -62,7 +74,7 @@ fn describe_ref(conn: &Connection, duckdb_ref: &str) -> Result<Vec<ColumnInfo>, 
                 name: row.get(0)?,
                 data_type: row.get(1)?,
                 nullable: {
-                    let val: String = row.get(2)?; // "null" column: YES/NO
+                    let val: String = row.get(2)?;
                     val == "YES"
                 },
                 key,
@@ -73,22 +85,46 @@ fn describe_ref(conn: &Connection, duckdb_ref: &str) -> Result<Vec<ColumnInfo>, 
     Ok(schema)
 }
 
-fn count_ref(conn: &Connection, duckdb_ref: &str) -> Option<u64> {
+pub(crate) fn count_ref(conn: &Connection, duckdb_ref: &str) -> Option<u64> {
     let sql = format!("SELECT COUNT(*) FROM {}", duckdb_ref);
     conn.query_row(&sql, params![], |row| row.get(0)).ok()
 }
 
-/// Recreates DuckDB views from persisted catalog. Call after opening DB on startup.
-/// Tables (materialized) already exist in the DB file; only views are re-created.
-pub fn rehydrate_views(conn: &Connection, data_sources: &[DataSource]) -> Result<(), AppError> {
+pub fn rehydrate_views(
+    conn: &Connection,
+    data_sources: &[DataSource],
+    connectors: &std::collections::HashMap<String, crate::state::Connector>,
+) -> Result<(), AppError> {
     for ds in data_sources {
         if ds.kind == "table" {
-            continue; // table already in DB file
+            continue;
         }
-        let duckdb_ref = build_duckdb_ref(&ds.path, &ds.format)?;
+        if ds.kind == "external" {
+            continue;
+        }
+        let view_name = match &ds.view_name {
+            Some(v) => v,
+            None => continue,
+        };
+        let connector = match connectors.get(&ds.connector_id) {
+            Some(c) => c,
+            None => continue,
+        };
+        if !matches!(connector.connector_type, ConnectorType::LocalFile) {
+            continue;
+        }
+        let path = match &connector.config.path {
+            Some(p) => p,
+            None => continue,
+        };
+        let format = match &connector.config.format {
+            Some(f) => f,
+            None => continue,
+        };
+        let duckdb_ref = build_duckdb_ref(path, format)?;
         let create_sql = format!(
             "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM {}",
-            ds.view_name, duckdb_ref
+            view_name, duckdb_ref
         );
         conn.execute_batch(&create_sql)?;
     }
@@ -109,7 +145,11 @@ fn sanitize_view_name(name: &str) -> String {
     let trimmed = sanitized.trim_matches('_').to_lowercase();
     if trimmed.is_empty() {
         "untitled_view".to_string()
-    } else if trimmed.chars().next().map_or(true, |c| c.is_numeric()) {
+    } else if trimmed
+        .chars()
+        .next()
+        .map_or(true, |c| c.is_numeric())
+    {
         format!("v_{}", trimmed)
     } else {
         trimmed
@@ -154,23 +194,88 @@ pub fn preview_file(
 pub fn create_data_source(
     name: String,
     view_name: String,
-    path: String,
-    format: Option<String>,
-    connection_id: Option<String>,
+    connector_id: String,
     materialize: Option<bool>,
     primary_key_column: Option<String>,
+    // For database connectors: specify which table to import
+    db_schema: Option<String>,
+    db_table: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DataSource, AppError> {
+    let connector = {
+        let connectors = state.connectors.lock();
+        connectors
+            .get(&connector_id)
+            .cloned()
+            .ok_or_else(|| AppError::FileError("Connector not found".to_string()))?
+    };
+
+    let conn = state.conn.lock();
+
+    let is_db_connector = matches!(
+        connector.connector_type,
+        ConnectorType::SQLite
+            | ConnectorType::DuckDB
+            | ConnectorType::PostgreSQL
+            | ConnectorType::Snowflake
+    );
+
+    if is_db_connector {
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Database connector missing alias".into()))?;
+        let schema_name = db_schema
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Missing schema for database table".into()))?;
+        let table_name = db_table
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Missing table name for database table".into()))?;
+
+        let qualified_name = format!(
+            "\"{}\".\"{}\".\"{}\"",
+            alias, schema_name, table_name
+        );
+        let columns = describe_ref(&conn, &qualified_name).unwrap_or_default();
+        let row_count = count_ref(&conn, &qualified_name);
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let data_source = DataSource {
+            id: id.clone(),
+            name,
+            connector_id,
+            qualified_name,
+            view_name: None,
+            schema: columns,
+            row_count,
+            kind: "external".to_string(),
+            primary_key_column: primary_key_column.filter(|s| !s.is_empty()),
+        };
+
+        drop(conn);
+        state.data_sources.lock().insert(id, data_source.clone());
+        catalog::save_state_catalog(&state);
+
+        return Ok(data_source);
+    }
+
+    // File-based connector
+    let path = connector
+        .config
+        .path
+        .as_deref()
+        .ok_or_else(|| AppError::FileError("File connector missing path".into()))?;
+    let format = connector
+        .config
+        .format
+        .as_deref()
+        .ok_or_else(|| AppError::FileError("File connector missing format".into()))?;
+
     let safe_view = sanitize_view_name(&view_name);
     let materialize = materialize.unwrap_or(false);
     let kind = if materialize { "table" } else { "view" };
 
-    let (fmt, duckdb_ref) = match &format {
-        Some(f) => format_to_ref(&path, f)?,
-        None => detect_format(&path)?,
-    };
-
-    let conn = state.conn.lock();
+    let (_, duckdb_ref) = format_to_ref(path, format)?;
 
     if materialize {
         let create_sql = format!(
@@ -190,61 +295,45 @@ pub fn create_data_source(
     let schema = describe_ref(&conn, &quoted)?;
     let row_count = count_ref(&conn, &quoted);
 
-    let source_type = if connection_id.is_some() {
-        "s3"
-    } else {
-        "local"
-    };
-
     let id = uuid::Uuid::new_v4().to_string();
     let data_source = DataSource {
         id: id.clone(),
         name,
-        view_name: safe_view,
-        path,
-        source_type: source_type.to_string(),
-        format: fmt,
+        connector_id,
+        qualified_name: quoted,
+        view_name: Some(safe_view),
         schema,
         row_count,
-        connection_id,
         kind: kind.to_string(),
         primary_key_column: primary_key_column.filter(|s| !s.is_empty()),
     };
 
+    drop(conn);
     state.data_sources.lock().insert(id, data_source.clone());
-
-    let catalog = catalog::catalog_from_state(
-        &*state.data_sources.lock(),
-        &*state.connections.lock(),
-    );
-    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+    catalog::save_state_catalog(&state);
 
     Ok(data_source)
 }
 
 #[tauri::command]
 pub fn remove_data_source(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    let (view_name, kind) = {
+    let ds = {
         let mut sources = state.data_sources.lock();
-        let ds = sources
+        sources
             .remove(&id)
-            .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?;
-        (ds.view_name, ds.kind)
+            .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?
     };
 
-    let conn = state.conn.lock();
-    if kind == "table" {
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", view_name))?;
-    } else {
-        conn.execute_batch(&format!("DROP VIEW IF EXISTS \"{}\"", view_name))?;
+    if let Some(view_name) = &ds.view_name {
+        let conn = state.conn.lock();
+        if ds.kind == "table" {
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", view_name))?;
+        } else if ds.kind == "view" {
+            conn.execute_batch(&format!("DROP VIEW IF EXISTS \"{}\"", view_name))?;
+        }
     }
-    drop(conn);
 
-    let catalog = catalog::catalog_from_state(
-        &*state.data_sources.lock(),
-        &*state.connections.lock(),
-    );
-    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+    catalog::save_state_catalog(&state);
 
     Ok(())
 }
@@ -268,18 +357,16 @@ pub fn get_schema(
 
 #[tauri::command]
 pub fn get_preview(dataset_id: String, state: State<'_, AppState>) -> Result<Vec<u8>, AppError> {
-    let view_name = {
+    let qualified_name = {
         let sources = state.data_sources.lock();
-        let ds = sources
-            .get(&dataset_id)
-            .ok_or_else(|| {
-                AppError::FileError(format!("Data source not found: {}", dataset_id))
-            })?;
-        ds.view_name.clone()
+        let ds = sources.get(&dataset_id).ok_or_else(|| {
+            AppError::FileError(format!("Data source not found: {}", dataset_id))
+        })?;
+        ds.qualified_name.clone()
     };
 
     let conn = state.conn.lock();
-    let sql = format!("SELECT * FROM \"{}\" LIMIT 100", view_name);
+    let sql = format!("SELECT * FROM {} LIMIT 100", qualified_name);
     let mut stmt = conn.prepare(&sql)?;
     let frames = stmt.query_arrow(params![])?;
     let batches: Vec<RecordBatch> = frames.collect();
@@ -294,103 +381,67 @@ pub fn get_preview(dataset_id: String, state: State<'_, AppState>) -> Result<Vec
 #[tauri::command]
 pub fn update_data_source(
     id: String,
-    path: String,
     name: Option<String>,
     view_name: Option<String>,
-    format: Option<String>,
-    connection_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DataSource, AppError> {
-    let (old_view_name, kind) = {
-        let sources = state.data_sources.lock();
-        let ds = sources
-            .get(&id)
-            .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?;
-        (ds.view_name.clone(), ds.kind.clone())
-    };
-
-    let safe_view = view_name
-        .as_ref()
-        .map(|v| sanitize_view_name(v))
-        .unwrap_or_else(|| sanitize_view_name(&old_view_name));
-
-    let conn = state.conn.lock();
-
-    if kind == "table" {
-        // For materialized tables only allow name/view_name changes; rename table in DB if needed
-        if safe_view != old_view_name {
-            conn.execute_batch(&format!(
-                "ALTER TABLE \"{}\" RENAME TO \"{}\"",
-                old_view_name, safe_view
-            ))?;
-        }
-        let mut sources = state.data_sources.lock();
-        let ds = sources
-            .get_mut(&id)
-            .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?;
-        if let Some(n) = name {
-            ds.name = n;
-        }
-        ds.view_name = safe_view.clone();
-        let result = ds.clone();
-        drop(sources);
-        drop(conn);
-
-        let catalog = catalog::catalog_from_state(
-            &*state.data_sources.lock(),
-            &*state.connections.lock(),
-        );
-        catalog::save_catalog(&state.catalog_path, &catalog).ok();
-
-        return Ok(result);
-    }
-
-    let (fmt, duckdb_ref) = match &format {
-        Some(f) => format_to_ref(&path, f)?,
-        None => detect_format(&path)?,
-    };
-
-    conn.execute_batch(&format!("DROP VIEW IF EXISTS \"{}\"", old_view_name))?;
-
-    let create_sql = format!(
-        "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM {}",
-        safe_view, duckdb_ref
-    );
-    conn.execute_batch(&create_sql)?;
-
-    let quoted = format!("\"{}\"", safe_view);
-    let schema = describe_ref(&conn, &quoted)?;
-    let row_count = count_ref(&conn, &quoted);
-
-    let source_type = if connection_id.is_some() {
-        "s3"
-    } else {
-        "local"
-    };
-
     let mut sources = state.data_sources.lock();
     let ds = sources
         .get_mut(&id)
         .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?;
 
-    ds.path = path;
-    ds.view_name = safe_view.clone();
-    ds.source_type = source_type.to_string();
-    ds.format = fmt;
-    ds.schema = schema;
-    ds.row_count = row_count;
-    ds.connection_id = connection_id.clone();
+    if ds.kind == "external" {
+        if let Some(n) = name {
+            ds.name = n;
+        }
+        let result = ds.clone();
+        drop(sources);
+        catalog::save_state_catalog(&state);
+        return Ok(result);
+    }
+
+    let old_view_name = ds.view_name.clone().unwrap_or_default();
+    let new_view_name = view_name
+        .as_ref()
+        .map(|v| sanitize_view_name(v))
+        .unwrap_or_else(|| sanitize_view_name(&old_view_name));
+
+    if new_view_name != old_view_name && !old_view_name.is_empty() {
+        let conn = state.conn.lock();
+        if ds.kind == "table" {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"{}\" RENAME TO \"{}\"",
+                old_view_name, new_view_name
+            ))?;
+        } else {
+            let connector = {
+                let connectors = state.connectors.lock();
+                connectors.get(&ds.connector_id).cloned()
+            };
+            if let Some(c) = connector {
+                if let (Some(path), Some(format)) = (&c.config.path, &c.config.format) {
+                    let duckdb_ref = build_duckdb_ref(path, format)?;
+                    conn.execute_batch(&format!(
+                        "DROP VIEW IF EXISTS \"{}\"",
+                        old_view_name
+                    ))?;
+                    conn.execute_batch(&format!(
+                        "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM {}",
+                        new_view_name, duckdb_ref
+                    ))?;
+                }
+            }
+        }
+        ds.view_name = Some(new_view_name.clone());
+        ds.qualified_name = format!("\"{}\"", new_view_name);
+    }
+
     if let Some(n) = name {
         ds.name = n;
     }
     let result = ds.clone();
     drop(sources);
-
-    let catalog = catalog::catalog_from_state(
-        &*state.data_sources.lock(),
-        &*state.connections.lock(),
-    );
-    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+    catalog::save_state_catalog(&state);
 
     Ok(result)
 }

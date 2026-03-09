@@ -6,6 +6,7 @@ pub enum AppError {
     QueryError(String),
     AuthError(String),
     ExportError(String),
+    ConnectorError(String),
 }
 
 impl AppError {
@@ -15,6 +16,7 @@ impl AppError {
             AppError::QueryError(msg) => msg,
             AppError::AuthError(msg) => msg,
             AppError::ExportError(msg) => msg,
+            AppError::ConnectorError(msg) => msg,
         }
     }
 
@@ -24,6 +26,7 @@ impl AppError {
             AppError::QueryError(_) => "QUERY_ERROR",
             AppError::AuthError(_) => "AUTH_ERROR",
             AppError::ExportError(_) => "EXPORT_ERROR",
+            AppError::ConnectorError(_) => "CONNECTOR_ERROR",
         }
     }
 }
