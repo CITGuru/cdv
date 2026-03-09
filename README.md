@@ -123,7 +123,7 @@ Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between ba
 | Apache Arrow JS | Decode Arrow IPC buffers from backend |
 
 
-## Application Data (com.cdv.app)
+## Application Data (com.cdv.desktop)
 
 | File | Purpose |
 |------------------|----------------------------------------------|
