@@ -1,157 +1,248 @@
 import { useState } from "react";
-import type { DatasetInfo, S3Config } from "../../lib/types";
-import { connectS3, listBucketFiles, openRemoteDataset } from "../../lib/ipc";
+import { Loader2, Cloud, CheckCircle2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import type { ConnectionInfo } from "@/lib/types";
+import type { ParsedError } from "@/lib/errors";
+import { extractError } from "@/lib/errors";
+import { ErrorDisplay } from "@/components/shared/ErrorDisplay";
+import type { ConnectionProvider } from "@/lib/ipc";
+import { createConnection } from "@/lib/ipc";
+
+const PROVIDERS: { value: ConnectionProvider; label: string }[] = [
+  { value: "s3", label: "Amazon S3" },
+  { value: "gcp", label: "Google Cloud Storage" },
+  { value: "cloudflare", label: "Cloudflare R2" },
+];
 
 interface ConnectionManagerProps {
   onClose: () => void;
-  onDatasetOpen: (dataset: DatasetInfo) => void;
+  onCreated: (conn: ConnectionInfo) => void;
 }
 
-export function ConnectionManager({ onClose, onDatasetOpen }: ConnectionManagerProps) {
-  const [config, setConfig] = useState<S3Config>({
-    endpoint: "",
-    bucket: "",
-    region: "us-east-1",
-    access_key: "",
-    secret_key: "",
-    prefix: "",
-  });
-  const [files, setFiles] = useState<string[]>([]);
+export function ConnectionManager({ onClose, onCreated }: ConnectionManagerProps) {
+  const [provider, setProvider] = useState<ConnectionProvider>("s3");
+  const [name, setName] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [bucket, setBucket] = useState("");
+  const [region, setRegion] = useState(provider === "cloudflare" ? "auto" : "us-east-1");
+  const [accessKey, setAccessKey] = useState("");
+  const [secretKey, setSecretKey] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [accountId, setAccountId] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [error, setError] = useState<ParsedError | null>(null);
+  const [success, setSuccess] = useState(false);
 
-  const handleConnect = async () => {
+  const handleProviderChange = (p: ConnectionProvider) => {
+    setProvider(p);
+    if (p === "cloudflare") setRegion("auto");
+    else if (region === "auto") setRegion("us-east-1");
+  };
+
+  const handleCreate = async () => {
     setLoading(true);
     setError(null);
     try {
-      await connectS3({
-        ...config,
-        endpoint: config.endpoint || undefined,
-        prefix: config.prefix || undefined,
+      const conn = await createConnection({
+        name,
+        provider,
+        endpoint: provider === "s3" ? endpoint || undefined : undefined,
+        bucket,
+        region,
+        accessKey,
+        secretKey,
+        prefix: prefix || undefined,
+        accountId: provider === "cloudflare" ? accountId || undefined : undefined,
       });
-      const fileList = await listBucketFiles(config.bucket, config.prefix || undefined);
-      setFiles(fileList);
-      setConnected(true);
+      setSuccess(true);
+      onCreated(conn);
+      setTimeout(() => onClose(), 800);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      setError(extractError(e));
     } finally {
       setLoading(false);
     }
   };
 
-  const handleOpenFile = async (path: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const dataset = await openRemoteDataset(path);
-      onDatasetOpen(dataset);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const needsEndpoint = provider === "s3";
+  const needsRegion = provider !== "gcp";
+  const needsAccountId = provider === "cloudflare";
 
-  const updateField = (field: keyof S3Config, value: string) => {
-    setConfig((prev) => ({ ...prev, [field]: value }));
-  };
+  const canSubmit =
+    name.trim() &&
+    bucket.trim() &&
+    accessKey.trim() &&
+    secretKey.trim() &&
+    (!needsAccountId || accountId.trim());
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-700">
-          <h2 className="text-sm font-semibold text-zinc-200">S3 Connection</h2>
-          <button
-            onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-300 text-lg"
-          >
-            ✕
-          </button>
-        </div>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="w-[95vw] max-w-6xl sm:max-w-6xl min-h-[60vh] max-h-[90vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Cloud className="size-4" />
+            New Cloud Connection
+          </DialogTitle>
+          <DialogDescription>
+            Create a named connection with scoped credentials via DuckDB&apos;s HTTPFS extension.
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto p-5">
-          {error && (
-            <div className="mb-4 px-3 py-2 bg-red-900/30 border border-red-800 rounded text-sm text-red-300">
-              {error}
+        {error && <ErrorDisplay error={error} compact />}
+
+        {success && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-md text-sm text-green-500">
+            <CheckCircle2 className="size-4 shrink-0" />
+            Connection created!
+          </div>
+        )}
+
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">Provider</Label>
+            <div className="flex gap-1 p-0.5 bg-muted rounded-md mt-1">
+              {PROVIDERS.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  onClick={() => handleProviderChange(p.value)}
+                  className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                    provider === p.value
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
             </div>
-          )}
+          </div>
 
-          {!connected ? (
-            <div className="space-y-3">
-              <Field label="Endpoint (optional)" value={config.endpoint ?? ""} onChange={(v) => updateField("endpoint", v)} placeholder="s3.amazonaws.com" />
-              <Field label="Bucket" value={config.bucket} onChange={(v) => updateField("bucket", v)} placeholder="my-bucket" />
-              <Field label="Region" value={config.region} onChange={(v) => updateField("region", v)} placeholder="us-east-1" />
-              <Field label="Access Key" value={config.access_key} onChange={(v) => updateField("access_key", v)} type="password" />
-              <Field label="Secret Key" value={config.secret_key} onChange={(v) => updateField("secret_key", v)} type="password" />
-              <Field label="Path Prefix (optional)" value={config.prefix ?? ""} onChange={(v) => updateField("prefix", v)} placeholder="data/" />
+          <div>
+            <Label htmlFor="conn-name" className="text-xs">Connection Name</Label>
+            <Input
+              id="conn-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={
+                provider === "s3"
+                  ? "e.g. Production S3"
+                  : provider === "gcp"
+                    ? "e.g. Analytics GCS"
+                    : "e.g. Assets R2"
+              }
+              className="mt-1"
+            />
+          </div>
 
-              <button
-                onClick={handleConnect}
-                disabled={loading || !config.bucket || !config.access_key || !config.secret_key}
-                className="w-full mt-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-medium rounded transition-colors"
-              >
-                {loading ? "Connecting..." : "Test & Connect"}
-              </button>
-            </div>
-          ) : (
+          {needsAccountId && (
             <div>
-              <h3 className="text-xs font-semibold text-zinc-400 uppercase mb-2">
-                Files in s3://{config.bucket}
-              </h3>
-              {files.length === 0 && (
-                <p className="text-sm text-zinc-500">No files found</p>
-              )}
-              <ul className="space-y-1">
-                {files.map((f) => (
-                  <li key={f}>
-                    <button
-                      onClick={() => handleOpenFile(f)}
-                      disabled={loading}
-                      className="w-full text-left px-3 py-2 rounded text-sm text-zinc-300 hover:bg-zinc-800 transition-colors truncate"
-                    >
-                      {f}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <button
-                onClick={() => { setConnected(false); setFiles([]); }}
-                className="mt-4 text-xs text-zinc-500 hover:text-zinc-300"
-              >
-                ← Back to config
-              </button>
+              <Label htmlFor="conn-account-id" className="text-xs">
+                Account ID <span className="text-muted-foreground">(R2)</span>
+              </Label>
+              <Input
+                id="conn-account-id"
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+                placeholder="abc123def456..."
+                className="mt-1 font-mono"
+              />
             </div>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  type = "text",
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
-}) {
-  return (
-    <div>
-      <label className="block text-xs text-zinc-400 mb-1">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-blue-500"
-      />
-    </div>
+          {needsEndpoint && (
+            <div>
+              <Label htmlFor="conn-endpoint" className="text-xs">
+                Endpoint <span className="text-muted-foreground">(optional, for S3-compatible)</span>
+              </Label>
+              <Input
+                id="conn-endpoint"
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+                placeholder="s3.amazonaws.com"
+                className="mt-1"
+              />
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="conn-bucket" className="text-xs">Bucket</Label>
+              <Input
+                id="conn-bucket"
+                value={bucket}
+                onChange={(e) => setBucket(e.target.value)}
+                placeholder="my-bucket"
+                className="mt-1"
+              />
+            </div>
+            {needsRegion && (
+              <div>
+                <Label htmlFor="conn-region" className="text-xs">
+                  Region {provider === "cloudflare" && <span className="text-muted-foreground">(e.g. auto)</span>}
+                </Label>
+                <Input
+                  id="conn-region"
+                  value={region}
+                  onChange={(e) => setRegion(e.target.value)}
+                  placeholder={provider === "cloudflare" ? "auto" : "us-east-1"}
+                  className="mt-1"
+                />
+              </div>
+            )}
+            <div>
+              <Label htmlFor="conn-ak" className="text-xs">Access Key</Label>
+              <Input
+                id="conn-ak"
+                type="password"
+                value={accessKey}
+                onChange={(e) => setAccessKey(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
+              <Label htmlFor="conn-sk" className="text-xs">Secret Key</Label>
+              <Input
+                id="conn-sk"
+                type="password"
+                value={secretKey}
+                onChange={(e) => setSecretKey(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div className="col-span-2">
+              <Label htmlFor="conn-prefix" className="text-xs">
+                Path Prefix <span className="text-muted-foreground">(optional)</span>
+              </Label>
+              <Input
+                id="conn-prefix"
+                value={prefix}
+                onChange={(e) => setPrefix(e.target.value)}
+                placeholder="data/"
+                className="mt-1"
+              />
+            </div>
+          </div>
+
+          <Button
+            onClick={handleCreate}
+            disabled={loading || !canSubmit}
+            className="w-full gap-2"
+          >
+            {loading && <Loader2 className="size-4 animate-spin" />}
+            {loading ? "Creating..." : "Create Connection"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

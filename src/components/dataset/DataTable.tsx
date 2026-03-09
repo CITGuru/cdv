@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -8,7 +8,8 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useState } from "react";
+import { ArrowUp, ArrowDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface DataTableProps {
   columns: string[];
@@ -27,11 +28,21 @@ export function DataTable({ columns, rows }: DataTableProps) {
         cell: (info) => {
           const val = info.getValue();
           if (val === null || val === undefined) {
-            return <span className="text-zinc-600 italic">null</span>;
+            return <span className="text-muted-foreground/50 italic">NULL</span>;
+          }
+          if (typeof val === "boolean") {
+            return (
+              <span className={val ? "text-green-500" : "text-destructive"}>
+                {String(val)}
+              </span>
+            );
+          }
+          if (typeof val === "number") {
+            return <span className="tabular-nums">{val.toLocaleString()}</span>;
           }
           return String(val);
         },
-        size: Math.max(120, Math.min(col.length * 10 + 40, 300)),
+        size: Math.max(100, Math.min(col.length * 9 + 60, 280)),
       })),
     [columns]
   );
@@ -51,13 +62,13 @@ export function DataTable({ columns, rows }: DataTableProps) {
   const virtualizer = useVirtualizer({
     count: tableRows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 32,
+    estimateSize: () => 28,
     overscan: 50,
   });
 
   if (columns.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
+      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
         No data to display
       </div>
     );
@@ -65,33 +76,43 @@ export function DataTable({ columns, rows }: DataTableProps) {
 
   return (
     <div ref={parentRef} className="overflow-auto h-full">
-      <table className="w-max min-w-full text-sm border-collapse">
-        <thead className="sticky top-0 z-10 bg-zinc-900">
+      <table className="w-max min-w-full border-collapse text-xs">
+        <thead className="sticky top-0 z-10 bg-card">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
+              <th className="text-left px-2 py-1.5 text-[10px] font-medium text-muted-foreground border-b border-border w-12 tabular-nums">
+                #
+              </th>
               {headerGroup.headers.map((header) => (
                 <th
                   key={header.id}
-                  className="text-left px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-700 select-none relative"
+                  className="text-left px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground border-b border-border select-none relative group"
                   style={{ width: header.getSize() }}
                 >
                   <div
-                    className="flex items-center gap-1 cursor-pointer hover:text-zinc-200"
+                    className="flex items-center gap-1 cursor-pointer hover:text-foreground transition-colors"
                     onClick={header.column.getToggleSortingHandler()}
                   >
-                    {flexRender(
-                      header.column.columnDef.header,
-                      header.getContext()
+                    <span className="font-mono">
+                      {flexRender(
+                        header.column.columnDef.header,
+                        header.getContext()
+                      )}
+                    </span>
+                    {header.column.getIsSorted() === "asc" && (
+                      <ArrowUp className="size-3" />
                     )}
-                    {{
-                      asc: " ↑",
-                      desc: " ↓",
-                    }[header.column.getIsSorted() as string] ?? ""}
+                    {header.column.getIsSorted() === "desc" && (
+                      <ArrowDown className="size-3" />
+                    )}
                   </div>
                   <div
                     onMouseDown={header.getResizeHandler()}
                     onTouchStart={header.getResizeHandler()}
-                    className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-blue-500"
+                    className={cn(
+                      "absolute right-0 top-0 h-full w-1 cursor-col-resize opacity-0 group-hover:opacity-100 transition-opacity",
+                      "hover:bg-primary bg-border"
+                    )}
                   />
                 </th>
               ))}
@@ -99,20 +120,25 @@ export function DataTable({ columns, rows }: DataTableProps) {
           ))}
         </thead>
         <tbody>
-          <tr style={{ height: virtualizer.getVirtualItems()[0]?.start ?? 0 }}>
-            <td />
-          </tr>
+          {virtualizer.getVirtualItems().length > 0 && (
+            <tr style={{ height: virtualizer.getVirtualItems()[0]?.start ?? 0 }}>
+              <td />
+            </tr>
+          )}
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const row = tableRows[virtualRow.index];
             return (
               <tr
                 key={row.id}
-                className="border-b border-zinc-800/50 hover:bg-zinc-800/30"
+                className="border-b border-border/50 hover:bg-muted/30 transition-colors"
               >
+                <td className="px-2 py-1 text-[10px] text-muted-foreground/60 font-mono tabular-nums">
+                  {virtualRow.index + 1}
+                </td>
                 {row.getVisibleCells().map((cell) => (
                   <td
                     key={cell.id}
-                    className="px-3 py-1.5 text-xs text-zinc-300 font-mono truncate max-w-xs"
+                    className="px-2.5 py-1 text-xs font-mono truncate max-w-xs"
                     style={{ width: cell.column.getSize() }}
                   >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -121,15 +147,17 @@ export function DataTable({ columns, rows }: DataTableProps) {
               </tr>
             );
           })}
-          <tr
-            style={{
-              height:
-                virtualizer.getTotalSize() -
-                (virtualizer.getVirtualItems().at(-1)?.end ?? 0),
-            }}
-          >
-            <td />
-          </tr>
+          {virtualizer.getVirtualItems().length > 0 && (
+            <tr
+              style={{
+                height:
+                  virtualizer.getTotalSize() -
+                  (virtualizer.getVirtualItems().at(-1)?.end ?? 0),
+              }}
+            >
+              <td />
+            </tr>
+          )}
         </tbody>
       </table>
     </div>

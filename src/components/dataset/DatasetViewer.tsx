@@ -1,12 +1,30 @@
-import type { DatasetInfo, QueryResult, PaginationState } from "../../lib/types";
+import {
+  ChevronFirst,
+  ChevronLast,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Rows3,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { DataSource, QueryResult, PaginationState } from "@/lib/types";
+import type { ParsedError } from "@/lib/errors";
 import { SchemaPanel } from "./SchemaPanel";
 import { DataTable } from "./DataTable";
+import { ErrorDisplay } from "@/components/shared/ErrorDisplay";
 
 interface DatasetViewerProps {
-  dataset: DatasetInfo;
+  dataset: DataSource;
   previewData: QueryResult | null;
   loading: boolean;
-  error: string | null;
+  error: ParsedError | null;
   pagination: PaginationState;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
@@ -30,15 +48,18 @@ export function DatasetViewer({
       <SchemaPanel dataset={dataset} />
 
       {error && (
-        <div className="mx-4 mt-2 px-3 py-2 bg-red-900/30 border border-red-800 rounded text-sm text-red-300">
-          {error}
+        <div className="mx-3 mt-2">
+          <ErrorDisplay error={error} compact />
         </div>
       )}
 
       <div className="flex-1 overflow-hidden relative">
         {loading && (
-          <div className="absolute inset-0 bg-zinc-950/50 flex items-center justify-center z-20">
-            <div className="text-sm text-zinc-400">Loading...</div>
+          <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex items-center justify-center z-20">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Loading data...
+            </div>
           </div>
         )}
         {previewData && (
@@ -46,60 +67,71 @@ export function DatasetViewer({
         )}
       </div>
 
-      {/* Pagination */}
-      <div className="flex items-center justify-between px-4 py-2 border-t border-zinc-700 bg-zinc-900 text-xs text-zinc-400 shrink-0">
+      {/* Pagination Bar */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-t border-border bg-card text-xs text-muted-foreground shrink-0">
         <div className="flex items-center gap-2">
-          <span>Rows per page:</span>
-          <select
-            value={pagination.pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            className="bg-zinc-800 border border-zinc-700 text-zinc-300 rounded px-2 py-1 text-xs"
+          <span>Rows per page</span>
+          <Select
+            value={String(pagination.pageSize)}
+            onValueChange={(v) => onPageSizeChange(Number(v))}
           >
-            <option value={100}>100</option>
-            <option value={500}>500</option>
-            <option value={1000}>1,000</option>
-          </select>
+            <SelectTrigger className="h-6 w-20 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="100">100</SelectItem>
+              <SelectItem value="500">500</SelectItem>
+              <SelectItem value="1000">1,000</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
-        <div className="flex items-center gap-3">
-          <span>
+        <div className="flex items-center gap-1.5">
+          <span className="tabular-nums">
             Page {pagination.page + 1}
             {totalPages ? ` of ${totalPages.toLocaleString()}` : ""}
           </span>
-          <div className="flex gap-1">
-            <button
+          <div className="flex gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={() => onPageChange(0)}
               disabled={pagination.page === 0}
-              className="px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              ««
-            </button>
-            <button
+              <ChevronFirst className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={() => onPageChange(pagination.page - 1)}
               disabled={pagination.page === 0}
-              className="px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              «
-            </button>
-            <button
+              <ChevronLeft className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={() => onPageChange(pagination.page + 1)}
               disabled={totalPages !== null && pagination.page + 1 >= totalPages}
-              className="px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              »
-            </button>
-            <button
+              <ChevronRight className="size-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={() => onPageChange((totalPages ?? 1) - 1)}
               disabled={totalPages !== null && pagination.page + 1 >= totalPages}
-              className="px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              »»
-            </button>
+              <ChevronLast className="size-3.5" />
+            </Button>
           </div>
         </div>
 
-        <div>
-          {pagination.totalRows?.toLocaleString() ?? "?"} total rows
+        <div className="flex items-center gap-1">
+          <Rows3 className="size-3" />
+          <span className="tabular-nums">
+            {pagination.totalRows?.toLocaleString() ?? "?"} total rows
+          </span>
         </div>
       </div>
     </div>

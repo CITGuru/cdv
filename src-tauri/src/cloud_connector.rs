@@ -1,58 +1,169 @@
 use duckdb::params;
-use serde::Deserialize;
 use tauri::State;
 
+use crate::catalog;
 use crate::error::AppError;
-use crate::state::{AppState, ColumnInfo, DatasetInfo};
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-pub struct S3Config {
-    pub endpoint: Option<String>,
-    pub bucket: String,
-    pub region: String,
-    pub access_key: String,
-    pub secret_key: String,
-    pub prefix: Option<String>,
-}
+use crate::state::{AppState, ConnectionInfo};
 
 #[tauri::command]
-pub fn connect_s3(config: S3Config, state: State<'_, AppState>) -> Result<(), AppError> {
+pub fn create_connection(
+    name: String,
+    provider: String,
+    endpoint: Option<String>,
+    bucket: String,
+    region: String,
+    access_key: String,
+    secret_key: String,
+    prefix: Option<String>,
+    account_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ConnectionInfo, AppError> {
     let conn = state.conn.lock();
 
     conn.execute_batch("INSTALL httpfs; LOAD httpfs;")
         .map_err(|e| AppError::AuthError(format!("Failed to load HTTPFS: {}", e)))?;
 
-    conn.execute_batch(&format!("SET s3_region='{}';", config.region))
-        .map_err(|e| AppError::AuthError(e.to_string()))?;
-    conn.execute_batch(&format!("SET s3_access_key_id='{}';", config.access_key))
-        .map_err(|e| AppError::AuthError(e.to_string()))?;
-    conn.execute_batch(&format!("SET s3_secret_access_key='{}';", config.secret_key))
-        .map_err(|e| AppError::AuthError(e.to_string()))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let secret_name = format!("cdv_{}", id.replace("-", "_"));
 
-    if let Some(endpoint) = &config.endpoint {
-        conn.execute_batch(&format!("SET s3_endpoint='{}';", endpoint))
-            .map_err(|e| AppError::AuthError(e.to_string()))?;
-        conn.execute_batch("SET s3_url_style='path';")
-            .map_err(|e| AppError::AuthError(e.to_string()))?;
-    }
+    let parts: Vec<String> = match provider.as_str() {
+        "gcp" => {
+            let scope = format!("gcs://{}", bucket);
+            vec![
+                "TYPE GCS".to_string(),
+                format!("KEY_ID '{}'", access_key),
+                format!("SECRET '{}'", secret_key),
+                format!("SCOPE '{}'", scope),
+            ]
+        }
+        "cloudflare" => {
+            let account = account_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+                AppError::AuthError("Cloudflare R2 requires Account ID".to_string())
+            })?;
+            vec![
+                "TYPE R2".to_string(),
+                format!("ACCOUNT_ID '{}'", account),
+                format!("KEY_ID '{}'", access_key),
+                format!("SECRET '{}'", secret_key),
+                format!("REGION '{}'", if region.is_empty() { "auto" } else { region.as_str() }),
+            ]
+        }
+        _ => {
+            // s3 or s3-compatible
+            let scope = format!("s3://{}", bucket);
+            let mut parts = vec![
+                "TYPE S3".to_string(),
+                format!("KEY_ID '{}'", access_key),
+                format!("SECRET '{}'", secret_key),
+                format!("REGION '{}'", if region.is_empty() { "us-east-1" } else { region.as_str() }),
+                format!("SCOPE '{}'", scope),
+            ];
+            if let Some(ep) = &endpoint {
+                if !ep.is_empty() {
+                    parts.push(format!("ENDPOINT '{}'", ep));
+                    parts.push("URL_STYLE 'path'".to_string());
+                }
+            }
+            parts
+        }
+    };
+
+    let secret_sql = format!(
+        "CREATE SECRET \"{}\" ({})",
+        secret_name,
+        parts.join(", ")
+    );
+
+    conn.execute_batch(&secret_sql)
+        .map_err(|e| AppError::AuthError(format!("Failed to create secret: {}", e)))?;
+
+    let connection = ConnectionInfo {
+        id: id.clone(),
+        name,
+        provider: provider.to_lowercase(),
+        endpoint,
+        bucket,
+        region,
+        prefix,
+        account_id,
+        secret_name,
+    };
+
+    drop(conn);
+    state.connections.lock().insert(id.clone(), connection.clone());
+
+    let catalog = catalog::catalog_from_state(
+        &*state.data_sources.lock(),
+        &*state.connections.lock(),
+    );
+    catalog::save_catalog(&state.catalog_path, &catalog).ok();
+
+    Ok(connection)
+}
+
+#[tauri::command]
+pub fn remove_connection(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let secret_name = {
+        let mut connections = state.connections.lock();
+        let info = connections
+            .remove(&id)
+            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?;
+        info.secret_name
+    };
+
+    let conn = state.conn.lock();
+    conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", secret_name))
+        .map_err(|e| AppError::AuthError(e.to_string()))?;
+    drop(conn);
+
+    let catalog = catalog::catalog_from_state(
+        &*state.data_sources.lock(),
+        &*state.connections.lock(),
+    );
+    catalog::save_catalog(&state.catalog_path, &catalog).ok();
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn list_bucket_files(
-    bucket: String,
-    prefix: Option<String>,
+pub fn list_connections(state: State<'_, AppState>) -> Result<Vec<ConnectionInfo>, AppError> {
+    Ok(state.connections.lock().values().cloned().collect())
+}
+
+fn connection_path_scheme(provider: &str) -> &'static str {
+    if provider == "gcp" {
+        "gcs"
+    } else {
+        "s3" // s3 and cloudflare (R2) use s3:// with their respective secrets
+    }
+}
+
+#[tauri::command]
+pub fn list_connection_files(
+    connection_id: String,
+    prefix_override: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, AppError> {
-    let conn = state.conn.lock();
-
-    let path = match prefix {
-        Some(p) => format!("s3://{}/{}/*", bucket, p),
-        None => format!("s3://{}/*", bucket),
+    let (bucket, default_prefix, provider) = {
+        let connections = state.connections.lock();
+        let info = connections
+            .get(&connection_id)
+            .ok_or_else(|| AppError::AuthError("Connection not found".to_string()))?;
+        (
+            info.bucket.clone(),
+            info.prefix.clone(),
+            info.provider.clone(),
+        )
     };
 
+    let scheme = connection_path_scheme(&provider);
+    let prefix = prefix_override.or(default_prefix);
+    let path = match prefix {
+        Some(p) if !p.is_empty() => format!("{}://{}/{}*", scheme, bucket, p),
+        _ => format!("{}://{}/*", scheme, bucket),
+    };
+
+    let conn = state.conn.lock();
     let sql = format!("SELECT file FROM glob('{}')", path);
     let mut stmt = conn.prepare(&sql)?;
     let files: Vec<String> = stmt
@@ -61,71 +172,4 @@ pub fn list_bucket_files(
         .collect();
 
     Ok(files)
-}
-
-#[tauri::command]
-pub fn open_remote_dataset(
-    s3_path: String,
-    state: State<'_, AppState>,
-) -> Result<DatasetInfo, AppError> {
-    let ext = s3_path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-
-    let (format, duckdb_ref) = match ext.as_str() {
-        "csv" => ("csv".to_string(), format!("read_csv_auto('{}')", s3_path)),
-        "tsv" => ("tsv".to_string(), format!("read_csv_auto('{}', delim='\\t')", s3_path)),
-        "json" => ("json".to_string(), format!("read_json_auto('{}')", s3_path)),
-        "jsonl" => ("jsonl".to_string(), format!("read_json_auto('{}')", s3_path)),
-        "parquet" => ("parquet".to_string(), format!("read_parquet('{}')", s3_path)),
-        _ => return Err(AppError::FileError(format!("Unsupported format: .{}", ext))),
-    };
-
-    let conn = state.conn.lock();
-
-    let describe_sql = format!("DESCRIBE SELECT * FROM {}", duckdb_ref);
-    let mut stmt = conn.prepare(&describe_sql)?;
-    let schema: Vec<ColumnInfo> = stmt
-        .query_map(params![], |row| {
-            Ok(ColumnInfo {
-                name: row.get(0)?,
-                data_type: row.get(1)?,
-                nullable: {
-                    let val: String = row.get(3)?;
-                    val == "YES"
-                },
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let count_sql = format!("SELECT COUNT(*) FROM {}", duckdb_ref);
-    let row_count: Option<u64> = conn
-        .query_row(&count_sql, params![], |row| row.get(0))
-        .ok();
-
-    let name = s3_path
-        .rsplit('/')
-        .next()
-        .unwrap_or("remote_dataset")
-        .to_string();
-
-    let id = uuid::Uuid::new_v4().to_string();
-
-    let dataset = DatasetInfo {
-        id: id.clone(),
-        name,
-        path: s3_path,
-        source_type: "s3".to_string(),
-        format,
-        schema,
-        row_count,
-        duckdb_ref,
-    };
-
-    state.datasets.lock().insert(id, dataset.clone());
-
-    Ok(dataset)
 }

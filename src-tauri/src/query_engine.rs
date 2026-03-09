@@ -23,10 +23,12 @@ pub fn batches_to_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<V
 
 #[tauri::command]
 pub fn run_query(sql: String, state: State<'_, AppState>) -> Result<Vec<u8>, AppError> {
-    let conn = state.conn.lock();
-    let mut stmt = conn.prepare(&sql)?;
-    let frames = stmt.query_arrow(params![])?;
-    let batches: Vec<RecordBatch> = frames.collect();
+    let batches: Vec<RecordBatch> = {
+        let conn = state.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let frames = stmt.query_arrow(params![])?;
+        frames.collect()
+    };
 
     if batches.is_empty() {
         return Ok(Vec::new());
@@ -48,10 +50,12 @@ pub fn run_paginated_query(
         sql, page_size, offset
     );
 
-    let conn = state.conn.lock();
-    let mut stmt = conn.prepare(&paginated_sql)?;
-    let frames = stmt.query_arrow(params![])?;
-    let batches: Vec<RecordBatch> = frames.collect();
+    let batches: Vec<RecordBatch> = {
+        let conn = state.conn.lock();
+        let mut stmt = conn.prepare(&paginated_sql)?;
+        let frames = stmt.query_arrow(params![])?;
+        frames.collect()
+    };
 
     if batches.is_empty() {
         return Ok(Vec::new());
@@ -68,14 +72,14 @@ pub fn stream_query(
 ) -> Result<(), AppError> {
     let conn = state.conn.lock();
     let mut stmt = conn.prepare(&sql)?;
-    let frames = stmt.query_arrow(params![])?;
-    let batches: Vec<RecordBatch> = frames.collect();
+    let mut frames = stmt.query_arrow(params![])?;
 
-    for batch in &batches {
-        let ipc_bytes = batches_to_ipc(&batch.schema(), &[batch.clone()])?;
+    for batch in frames.by_ref() {
+        let ipc_bytes = batches_to_ipc(&batch.schema(), &[batch])?;
         let _ = app_handle.emit("query-chunk", ipc_bytes);
     }
 
+    drop(conn);
     let _ = app_handle.emit("query-complete", ());
 
     Ok(())

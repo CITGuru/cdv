@@ -1,17 +1,34 @@
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { exportData } from "../../lib/ipc";
+import { Download, Loader2, CheckCircle2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import type { ParsedError } from "@/lib/errors";
+import { extractError } from "@/lib/errors";
+import { ErrorDisplay } from "@/components/shared/ErrorDisplay";
+import { exportData } from "@/lib/ipc";
 
 interface ExportModalProps {
   defaultQuery: string;
+  defaultFormat?: "csv" | "parquet" | "json";
   onClose: () => void;
 }
 
-export function ExportModal({ defaultQuery, onClose }: ExportModalProps) {
+export function ExportModal({ defaultQuery, defaultFormat = "csv", onClose }: ExportModalProps) {
   const [query, setQuery] = useState(defaultQuery);
-  const [format, setFormat] = useState<"csv" | "parquet" | "json">("csv");
+  const [format, setFormat] = useState<"csv" | "parquet" | "json">(
+    ["csv", "parquet", "json"].includes(defaultFormat) ? defaultFormat : "csv"
+  );
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ParsedError | null>(null);
   const [success, setSuccess] = useState(false);
 
   const handleExport = async () => {
@@ -32,76 +49,83 @@ export function ExportModal({ defaultQuery, onClose }: ExportModalProps) {
       setSuccess(true);
       setTimeout(() => onClose(), 1500);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      setError(extractError(e));
     } finally {
       setLoading(false);
     }
   };
 
+  const formats = [
+    { value: "csv" as const, label: "CSV" },
+    { value: "parquet" as const, label: "Parquet" },
+    { value: "json" as const, label: "JSON" },
+  ];
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl w-full max-w-md">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-700">
-          <h2 className="text-sm font-semibold text-zinc-200">Export Data</h2>
-          <button
-            onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-300 text-lg"
-          >
-            ✕
-          </button>
-        </div>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Download className="size-4" />
+            Export Data
+          </DialogTitle>
+          <DialogDescription>
+            Export query results to a local file.
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="p-5 space-y-4">
-          {error && (
-            <div className="px-3 py-2 bg-red-900/30 border border-red-800 rounded text-sm text-red-300">
-              {error}
-            </div>
-          )}
+        {error && <ErrorDisplay error={error} compact />}
 
-          {success && (
-            <div className="px-3 py-2 bg-green-900/30 border border-green-800 rounded text-sm text-green-300">
-              Export complete!
-            </div>
-          )}
+        {success && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-green-500/10 border border-green-500/30 rounded-md text-sm text-green-500">
+            <CheckCircle2 className="size-4 shrink-0" />
+            Export complete!
+          </div>
+        )}
 
+        <div className="space-y-4">
           <div>
-            <label className="block text-xs text-zinc-400 mb-1">Format</label>
-            <div className="flex gap-2">
-              {(["csv", "parquet", "json"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFormat(f)}
-                  className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
-                    format === f
-                      ? "bg-blue-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-                  }`}
+            <Label className="text-xs">Format</Label>
+            <div className="flex gap-1.5 mt-1.5">
+              {formats.map((f) => (
+                <Button
+                  key={f.value}
+                  variant={format === f.value ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setFormat(f.value)}
+                  className="flex-1 text-xs"
                 >
-                  {f.toUpperCase()}
-                </button>
+                  {f.label}
+                </Button>
               ))}
             </div>
           </div>
 
           <div>
-            <label className="block text-xs text-zinc-400 mb-1">Query</label>
-            <textarea
+            <Label htmlFor="export-query" className="text-xs">Query</Label>
+            <Textarea
+              id="export-query"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               rows={4}
-              className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm text-zinc-200 font-mono resize-none focus:outline-none focus:border-blue-500"
+              className="mt-1.5 font-mono text-xs resize-none"
             />
           </div>
 
-          <button
+          <Button
             onClick={handleExport}
             disabled={loading || !query.trim()}
-            className="w-full px-4 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-medium rounded transition-colors"
+            className="w-full gap-2"
           >
+            {loading ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Download className="size-4" />
+            )}
             {loading ? "Exporting..." : "Export"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

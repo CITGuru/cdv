@@ -1,6 +1,9 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import type { QueryResult } from "../lib/types";
-import { runQuery, runPaginatedQuery } from "../lib/ipc";
+import type { ParsedError } from "../lib/errors";
+import { extractError } from "../lib/errors";
+import { runPaginatedQuery, streamQuery } from "../lib/ipc";
 import { decodeArrowIPC } from "../lib/arrow";
 
 export interface QueryHistoryEntry {
@@ -11,73 +14,177 @@ export interface QueryHistoryEntry {
   error?: string;
 }
 
+interface TabQueryState {
+  result: QueryResult | null;
+  error: ParsedError | null;
+  executionTimeMs: number | null;
+  lastSql: string | null;
+  page: number;
+}
+
+const DEFAULT_PAGE_SIZE = 100;
+
+const EMPTY_TAB_STATE: TabQueryState = {
+  result: null,
+  error: null,
+  executionTimeMs: null,
+  lastSql: null,
+  page: 0,
+};
+
 export function useQueryEngine() {
-  const [result, setResult] = useState<QueryResult | null>(null);
+  const [tabStates, setTabStates] = useState<Record<string, TabQueryState>>({});
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [executionTimeMs, setExecutionTimeMs] = useState<number | null>(null);
+  const [activeTabId, setActiveQueryTabId] = useState<string | null>(null);
   const [history, setHistory] = useState<QueryHistoryEntry[]>([]);
-  const [page, setPage] = useState(0);
-  const [pageSize] = useState(1000);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
-  const executeQuery = useCallback(async (sql: string) => {
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    setPage(0);
-    const start = performance.now();
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const runningRef = useRef(false);
 
-    try {
-      const ipcData = await runQuery(sql);
-      const elapsed = Math.round(performance.now() - start);
-      setExecutionTimeMs(elapsed);
-      const decoded = decodeArrowIPC(ipcData);
-      setResult(decoded);
-      setHistory((prev) => [
-        { sql, timestamp: Date.now(), status: "success", executionTimeMs: elapsed },
-        ...prev.slice(0, 19),
-      ]);
-    } catch (e) {
-      const elapsed = Math.round(performance.now() - start);
-      setExecutionTimeMs(elapsed);
-      const msg = typeof e === "string" ? e : String(e);
-      setError(msg);
-      setHistory((prev) => [
-        { sql, timestamp: Date.now(), status: "error", executionTimeMs: elapsed, error: msg },
-        ...prev.slice(0, 19),
-      ]);
-    } finally {
-      setLoading(false);
-    }
+  const updateTabState = useCallback((tabId: string, patch: Partial<TabQueryState>) => {
+    setTabStates((prev) => ({
+      ...prev,
+      [tabId]: { ...(prev[tabId] ?? EMPTY_TAB_STATE), ...patch },
+    }));
   }, []);
 
-  const paginateQuery = useCallback(
-    async (sql: string, newPage: number) => {
+  const executeQuery = useCallback(
+    async (sql: string, options?: { useStreaming?: boolean; tabId?: string }) => {
+      if (runningRef.current) return;
+      runningRef.current = true;
+      const tabId = options?.tabId ?? activeTabIdRef.current;
       setLoading(true);
-      setError(null);
+      if (tabId) updateTabState(tabId, { error: null, result: null, lastSql: sql, page: 0 });
+      const start = performance.now();
+
       try {
-        const ipcData = await runPaginatedQuery(sql, newPage, pageSize);
-        const decoded = decodeArrowIPC(ipcData);
-        setResult(decoded);
-        setPage(newPage);
+        if (options?.useStreaming) {
+          const chunks: number[][] = [];
+          let resolveComplete: () => void;
+          const completePromise = new Promise<void>((r) => {
+            resolveComplete = r;
+          });
+          const unlistenChunk = await listen<number[]>("query-chunk", (e) => {
+            chunks.push(e.payload);
+          });
+          const unlistenComplete = await listen("query-complete", () => {
+            resolveComplete();
+          });
+          await streamQuery(sql);
+          await completePromise;
+          unlistenChunk();
+          unlistenComplete();
+
+          const elapsed = Math.round(performance.now() - start);
+          let columns: string[] = [];
+          const allRows: Record<string, unknown>[] = [];
+          for (const chunk of chunks) {
+            const decoded = decodeArrowIPC(chunk);
+            if (decoded.columns.length) columns = decoded.columns;
+            allRows.push(...decoded.rows);
+          }
+          const result = { columns, rows: allRows };
+          if (tabId) updateTabState(tabId, { result, executionTimeMs: elapsed });
+          setHistory((prev) => [
+            { sql, timestamp: Date.now(), status: "success", executionTimeMs: elapsed },
+            ...prev.slice(0, 19),
+          ]);
+        } else {
+          const ipcData = await runPaginatedQuery(sql, 0, pageSize);
+          const elapsed = Math.round(performance.now() - start);
+          const decoded = decodeArrowIPC(ipcData);
+          if (tabId) updateTabState(tabId, { result: decoded, executionTimeMs: elapsed });
+          setHistory((prev) => [
+            { sql, timestamp: Date.now(), status: "success", executionTimeMs: elapsed },
+            ...prev.slice(0, 19),
+          ]);
+        }
       } catch (e) {
-        setError(typeof e === "string" ? e : String(e));
+        const elapsed = Math.round(performance.now() - start);
+        const parsed = extractError(e);
+        if (tabId) updateTabState(tabId, { error: parsed, executionTimeMs: elapsed });
+        setHistory((prev) => [
+          { sql, timestamp: Date.now(), status: "error", executionTimeMs: elapsed, error: parsed.message },
+          ...prev.slice(0, 19),
+        ]);
+      } finally {
+        runningRef.current = false;
+        setLoading(false);
+      }
+    },
+    [updateTabState, pageSize]
+  );
+
+  const changePage = useCallback(
+    async (newPage: number) => {
+      const tabId = activeTabIdRef.current;
+      if (!tabId) return;
+      const tabState = tabStates[tabId];
+      if (!tabState?.lastSql) return;
+      setLoading(true);
+      updateTabState(tabId, { error: null });
+      try {
+        const ipcData = await runPaginatedQuery(tabState.lastSql, newPage, pageSize);
+        const decoded = decodeArrowIPC(ipcData);
+        updateTabState(tabId, { result: decoded, page: newPage });
+      } catch (e) {
+        updateTabState(tabId, { error: extractError(e) });
       } finally {
         setLoading(false);
       }
     },
-    [pageSize]
+    [pageSize, updateTabState, tabStates]
   );
 
+  const currentTabState = useMemo(
+    () => (activeTabId ? tabStates[activeTabId] ?? EMPTY_TAB_STATE : EMPTY_TAB_STATE),
+    [activeTabId, tabStates]
+  );
+
+  const changePageSize = useCallback(
+    async (newPageSize: number) => {
+      setPageSize(newPageSize);
+      const tabId = activeTabIdRef.current;
+      if (!tabId) return;
+      const tabState = tabStates[tabId];
+      if (!tabState?.lastSql) return;
+      setLoading(true);
+      updateTabState(tabId, { error: null, page: 0 });
+      try {
+        const ipcData = await runPaginatedQuery(tabState.lastSql, 0, newPageSize);
+        const decoded = decodeArrowIPC(ipcData);
+        updateTabState(tabId, { result: decoded });
+      } catch (e) {
+        updateTabState(tabId, { error: extractError(e) });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [updateTabState, tabStates]
+  );
+
+  const clearTabState = useCallback((tabId: string) => {
+    setTabStates((prev) => {
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  }, []);
+
   return {
-    result,
+    result: currentTabState.result,
     loading,
-    error,
-    executionTimeMs,
-    history,
-    page,
+    error: currentTabState.error,
+    executionTimeMs: currentTabState.executionTimeMs,
+    page: currentTabState.page,
     pageSize,
+    history,
     executeQuery,
-    paginateQuery,
+    changePage,
+    changePageSize,
+    setActiveQueryTabId,
+    clearTabState,
   };
 }

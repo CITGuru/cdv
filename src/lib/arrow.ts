@@ -1,4 +1,4 @@
-import { tableFromIPC } from "apache-arrow";
+import { tableFromIPC, type Vector } from "apache-arrow";
 import type { QueryResult } from "./types";
 
 export function decodeArrowIPC(buffer: number[]): QueryResult {
@@ -10,17 +10,24 @@ export function decodeArrowIPC(buffer: number[]): QueryResult {
   const table = tableFromIPC(bytes);
 
   const columns = table.schema.fields.map((f) => f.name);
-  const rows: Record<string, unknown>[] = [];
+  const numRows = table.numRows;
+  const numCols = columns.length;
 
-  for (let i = 0; i < table.numRows; i++) {
+  const vectors: (Vector | null)[] = new Array(numCols);
+  for (let c = 0; c < numCols; c++) {
+    vectors[c] = table.getChild(columns[c]);
+  }
+
+  const rows: Record<string, unknown>[] = new Array(numRows);
+  for (let i = 0; i < numRows; i++) {
     const row: Record<string, unknown> = {};
-    for (const col of columns) {
-      const val = table.getChild(col)?.get(i);
-      row[col] = val !== undefined && val !== null && typeof val === "bigint"
+    for (let c = 0; c < numCols; c++) {
+      const val = vectors[c]?.get(i);
+      row[columns[c]] = val !== undefined && val !== null && typeof val === "bigint"
         ? Number(val)
         : val;
     }
-    rows.push(row);
+    rows[i] = row;
   }
 
   return { columns, rows };
