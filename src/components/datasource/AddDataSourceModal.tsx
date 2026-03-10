@@ -196,6 +196,24 @@ function fileBaseName(filePath: string): string {
   return filePath.split(/[/\\]/).pop() ?? "Untitled";
 }
 
+const EXT_TO_FORMAT: Record<string, string> = {
+  csv: "csv",
+  tsv: "tsv",
+  json: "json",
+  jsonl: "jsonl",
+  parquet: "parquet",
+  xlsx: "xlsx",
+  avro: "avro",
+  arrow: "arrow_ipc",
+  ipc: "arrow_ipc",
+};
+
+function pathToFormat(pathOrUrl: string): string {
+  const path = pathOrUrl.includes("?") ? pathOrUrl.split("?")[0] : pathOrUrl;
+  const ext = (path.split(/[/\\]/).pop() ?? "").replace(/^.*\./, "").toLowerCase();
+  return EXT_TO_FORMAT[ext] ?? "csv";
+}
+
 function nameToViewName(name: string): string {
   return name
     .replace(/\.[^.]+$/, "")
@@ -406,6 +424,7 @@ export function AddDataSourceModal({
     });
     if (result) {
       form.setValue("file.path", result);
+      form.setValue("file.format", pathToFormat(result), { shouldDirty: true });
       const currentName = (form.getValues("name") ?? "").trim();
       if (!currentName) {
         const baseName = fileBaseName(result).replace(/\.[^.]+$/, "");
@@ -418,7 +437,8 @@ export function AddDataSourceModal({
     const u = form.getValues("file.url").trim();
     if (!u) return;
     const wantDownload = form.getValues("file.downloadLocal");
-    const fmt = form.getValues("file.format");
+    const fmt = pathToFormat(u);
+    form.setValue("file.format", fmt, { shouldDirty: true });
 
     if (wantDownload) {
       setLoading(true);
