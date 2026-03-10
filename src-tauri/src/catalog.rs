@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppState, Connector, ConnectorConfig, ConnectorType, DataSource};
+use crate::state::{AppState, Connector, ConnectorConfig, ConnectorType, DataSource, Driver};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Catalog {
@@ -151,6 +151,7 @@ fn migrate_legacy(legacy: LegacyCatalog) -> Catalog {
             row_count: ds.row_count,
             kind: ds.kind.clone(),
             primary_key_column: ds.primary_key_column.clone(),
+            driver: Driver::DuckDB,
         });
     }
 

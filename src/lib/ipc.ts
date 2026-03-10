@@ -9,6 +9,7 @@ import type {
   FilePreview,
   Settings,
   PersistedWorkspace,
+  Driver,
 } from "./types";
 
 // ──── File preview ────
@@ -30,6 +31,7 @@ export async function createDataSource(params: {
   primaryKeyColumn?: string | null;
   dbSchema?: string;
   dbTable?: string;
+  driver?: Driver;
 }): Promise<DataSource> {
   return invoke("create_data_source", {
     name: params.name,
@@ -39,6 +41,7 @@ export async function createDataSource(params: {
     primaryKeyColumn: params.primaryKeyColumn ?? null,
     dbSchema: params.dbSchema ?? null,
     dbTable: params.dbTable ?? null,
+    driver: params.driver ?? null,
   });
 }
 
@@ -178,6 +181,12 @@ export async function listConnectionFiles(
     connectionId,
     prefixOverride: prefixOverride ?? null,
   });
+}
+
+// ──── Download ────
+
+export async function downloadUrl(url: string): Promise<string> {
+  return invoke("download_url", { url });
 }
 
 // ──── Export ────

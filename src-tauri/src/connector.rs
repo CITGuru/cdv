@@ -719,6 +719,13 @@ pub fn add_connector(
         if let Some(sk) = &secret_key {
             final_config.password = Some(sk.clone());
         }
+    } else if matches!(
+        connector_type,
+        ConnectorType::PostgreSQL | ConnectorType::Snowflake
+    ) {
+        if let Some(sk) = &secret_key {
+            final_config.password = Some(sk.clone());
+        }
     }
 
     let connector = Connector {
@@ -786,6 +793,13 @@ pub fn test_connector(
         if let Some(ak) = &access_key {
             final_config.user = Some(ak.clone());
         }
+        if let Some(sk) = &secret_key {
+            final_config.password = Some(sk.clone());
+        }
+    } else if matches!(
+        connector_type,
+        ConnectorType::PostgreSQL | ConnectorType::Snowflake
+    ) {
         if let Some(sk) = &secret_key {
             final_config.password = Some(sk.clone());
         }

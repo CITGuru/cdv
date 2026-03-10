@@ -62,6 +62,8 @@ pub struct ConnectorConfig {
     pub user: Option<String>,
     #[serde(skip)]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -85,6 +87,43 @@ pub struct CatalogEntry {
     pub row_count: Option<u64>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub enum Driver {
+    #[default]
+    #[serde(rename = "duckdb")]
+    DuckDB,
+    #[serde(rename = "chdb")]
+    ChDB,
+}
+
+impl Driver {
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Driver::DuckDB => "DuckDB",
+            Driver::ChDB => "chDB",
+        }
+    }
+}
+
+impl ConnectorType {
+    pub fn supported_drivers(&self) -> &[Driver] {
+        match self {
+            ConnectorType::LocalFile
+            | ConnectorType::DuckDB
+            | ConnectorType::SQLite
+            | ConnectorType::S3
+            | ConnectorType::GCS
+            | ConnectorType::R2 => &[Driver::DuckDB],
+            ConnectorType::PostgreSQL | ConnectorType::Snowflake => &[Driver::DuckDB],
+        }
+    }
+
+    pub fn default_driver(&self) -> Driver {
+        self.supported_drivers()[0].clone()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DataSource {
     pub id: String,
@@ -99,6 +138,8 @@ pub struct DataSource {
     pub kind: String,
     #[serde(default)]
     pub primary_key_column: Option<String>,
+    #[serde(default)]
+    pub driver: Driver,
 }
 
 fn default_kind() -> String {

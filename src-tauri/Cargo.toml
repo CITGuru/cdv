@@ -28,4 +28,5 @@ arrow = { version = "56", features = ["ipc"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
+reqwest = { version = "0.12", features = ["stream"] }
 

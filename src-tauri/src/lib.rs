@@ -79,6 +79,7 @@ pub fn run() {
             dataset_manager::get_schema,
             dataset_manager::get_preview,
             dataset_manager::update_data_source,
+            dataset_manager::download_url,
             query_engine::run_query,
             query_engine::run_paginated_query,
             query_engine::stream_query,

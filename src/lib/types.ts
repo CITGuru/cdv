@@ -15,6 +15,33 @@ export type ConnectorType =
   | "gcs"
   | "r2";
 
+export type Driver = "duckdb" | "chdb";
+
+export const DRIVER_OPTIONS: { value: Driver; label: string }[] = [
+  { value: "duckdb", label: "DuckDB" },
+  { value: "chdb", label: "chDB" },
+];
+
+export function supportedDrivers(connectorType: ConnectorType): Driver[] {
+  switch (connectorType) {
+    case "local_file":
+    case "duckdb":
+    case "sqlite":
+    case "s3":
+    case "gcs":
+    case "r2":
+    case "postgresql":
+    case "snowflake":
+      return ["duckdb"];
+    default:
+      return ["duckdb"];
+  }
+}
+
+export function defaultDriver(connectorType: ConnectorType): Driver {
+  return supportedDrivers(connectorType)[0];
+}
+
 export interface ConnectorConfig {
   path?: string | null;
   format?: string | null;
@@ -27,6 +54,8 @@ export interface ConnectorConfig {
   port?: number | null;
   database?: string | null;
   user?: string | null;
+  /** Snowflake warehouse */
+  warehouse?: string | null;
 }
 
 export interface Connector {
@@ -55,6 +84,7 @@ export interface DataSource {
   row_count: number | null;
   kind?: string;
   primary_key_column?: string | null;
+  driver?: Driver;
 }
 
 /** @deprecated Use Connector instead — kept for backward compatibility in cloud_connector commands */

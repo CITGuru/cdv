@@ -3,11 +3,11 @@ use std::path::Path;
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
 use duckdb::Connection;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::catalog;
 use crate::error::AppError;
-use crate::state::{AppState, ColumnInfo, ConnectorType, DataSource, FilePreview};
+use crate::state::{AppState, ColumnInfo, ConnectorType, DataSource, Driver, FilePreview};
 
 pub fn build_duckdb_ref(path: &str, format: &str) -> Result<String, AppError> {
     let (_, duckdb_ref) = format_to_ref(path, format)?;
@@ -197,9 +197,9 @@ pub fn create_data_source(
     connector_id: String,
     materialize: Option<bool>,
     primary_key_column: Option<String>,
-    // For database connectors: specify which table to import
     db_schema: Option<String>,
     db_table: Option<String>,
+    driver: Option<Driver>,
     state: State<'_, AppState>,
 ) -> Result<DataSource, AppError> {
     let connector = {
@@ -239,6 +239,7 @@ pub fn create_data_source(
         let columns = describe_ref(&conn, &qualified_name).unwrap_or_default();
         let row_count = count_ref(&conn, &qualified_name);
 
+        let resolved_driver = driver.unwrap_or_else(|| connector.connector_type.default_driver());
         let id = uuid::Uuid::new_v4().to_string();
         let data_source = DataSource {
             id: id.clone(),
@@ -250,6 +251,7 @@ pub fn create_data_source(
             row_count,
             kind: "external".to_string(),
             primary_key_column: primary_key_column.filter(|s| !s.is_empty()),
+            driver: resolved_driver,
         };
 
         drop(conn);
@@ -295,6 +297,7 @@ pub fn create_data_source(
     let schema = describe_ref(&conn, &quoted)?;
     let row_count = count_ref(&conn, &quoted);
 
+    let resolved_driver = driver.unwrap_or_else(|| connector.connector_type.default_driver());
     let id = uuid::Uuid::new_v4().to_string();
     let data_source = DataSource {
         id: id.clone(),
@@ -306,6 +309,7 @@ pub fn create_data_source(
         row_count,
         kind: kind.to_string(),
         primary_key_column: primary_key_column.filter(|s| !s.is_empty()),
+        driver: resolved_driver,
     };
 
     drop(conn);
@@ -444,4 +448,56 @@ pub fn update_data_source(
     catalog::save_state_catalog(&state);
 
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn download_url(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<String, AppError> {
+    use std::path::PathBuf;
+
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .and_then(|s| {
+            let s = s.split('?').next().unwrap_or(s);
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
+        .unwrap_or_else(|| format!("download_{}", uuid::Uuid::new_v4()));
+
+    let downloads_dir: PathBuf = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::FileError(format!("resolve app data dir: {}", e)))?
+        .join("downloads");
+
+    tokio::fs::create_dir_all(&downloads_dir)
+        .await
+        .map_err(|e| AppError::FileError(format!("create downloads dir: {}", e)))?;
+
+    let dest = downloads_dir.join(&file_name);
+
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| AppError::FileError(format!("HTTP request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err(AppError::FileError(format!(
+            "HTTP {} for {}",
+            resp.status(),
+            url
+        )));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::FileError(format!("reading response body: {}", e)))?;
+
+    tokio::fs::write(&dest, &bytes)
+        .await
+        .map_err(|e| AppError::FileError(format!("write file: {}", e)))?;
+
+    Ok(dest.to_string_lossy().to_string())
 }
