@@ -278,9 +278,11 @@ export function AppLayout() {
   }, [tabs]);
 
   const handleDataSourceCreated = useCallback(
-    (ds: DataSource) => {
+    (ds: DataSource, opts?: { openTab?: boolean }) => {
       dataset.addDataSource(ds);
-      tabs.openDataTab(ds);
+      if (opts?.openTab !== false) {
+        tabs.openDataTab(ds);
+      }
     },
     [dataset, tabs]
   );

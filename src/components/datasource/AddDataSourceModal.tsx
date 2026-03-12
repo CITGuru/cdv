@@ -128,7 +128,7 @@ const FORM_DEFAULTS: DataSourceFormValues = {
 interface AddDataSourceModalProps {
   open: boolean;
   onClose: () => void;
-  onCreated: (ds: DataSource) => void;
+  onCreated: (ds: DataSource, opts?: { openTab?: boolean }) => void;
   connectors: Connector[];
   onAddConnector?: (params: {
     name: string;
@@ -794,7 +794,7 @@ export function AddDataSourceModal({
           dbTable: tableName,
           driver: drv,
         });
-        onCreated(ds);
+        onCreated(ds, { openTab: false });
       }
       onClose();
     } catch (e) {
