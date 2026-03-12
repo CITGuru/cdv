@@ -12,7 +12,7 @@ use crate::state::AppState;
 pub fn batches_to_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<Vec<u8>, AppError> {
     let mut buf: Vec<u8> = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut buf, schema)?;
+        let mut writer = StreamWriter::try_new(&mut buf, schema.as_ref())?;
         for batch in batches {
             writer.write(batch)?;
         }
