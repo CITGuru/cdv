@@ -10,6 +10,10 @@ import type {
   Settings,
   PersistedWorkspace,
   Driver,
+  VertexTableDef,
+  EdgeTableDef,
+  PropertyGraphInfo,
+  GraphAlgorithm,
 } from "./types";
 
 // ──── File preview ────
@@ -207,6 +211,45 @@ export async function getSettings(): Promise<Settings> {
 
 export async function setSettings(settings: Settings): Promise<void> {
   return invoke("set_settings", { settings });
+}
+
+// ──── Graph (DuckPGQ) ────
+
+export async function checkGraphSupport(): Promise<boolean> {
+  return invoke("check_graph_support");
+}
+
+export async function installGraphExtension(): Promise<void> {
+  return invoke("install_graph_extension");
+}
+
+export async function createPropertyGraph(
+  name: string,
+  vertexTables: VertexTableDef[],
+  edgeTables: EdgeTableDef[]
+): Promise<void> {
+  return invoke("create_property_graph", { name, vertexTables, edgeTables });
+}
+
+export async function listPropertyGraphs(): Promise<PropertyGraphInfo[]> {
+  return invoke("list_property_graphs");
+}
+
+export async function dropPropertyGraph(name: string): Promise<void> {
+  return invoke("drop_property_graph", { name });
+}
+
+export async function getPropertyGraphInfo(name: string): Promise<PropertyGraphInfo> {
+  return invoke("get_property_graph_info", { name });
+}
+
+export async function runGraphAlgorithm(
+  graphName: string,
+  algorithm: GraphAlgorithm,
+  vertexLabel: string,
+  edgeLabel: string
+): Promise<number[]> {
+  return invoke("run_graph_algorithm", { graphName, algorithm, vertexLabel, edgeLabel });
 }
 
 // ──── Workspace ────

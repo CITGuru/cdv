@@ -10,12 +10,15 @@ export type DataTab = {
   viewMode?: ViewMode;
 };
 
+export type ResultViewMode = "table" | "graph";
+
 export type QueryTab = {
   id: string;
   type: "query";
   name: string;
   initialSql?: string;
   autoExecute?: boolean;
+  resultView?: ResultViewMode;
 };
 
 export type OpenQueryTabOptions = {

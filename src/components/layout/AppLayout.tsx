@@ -40,8 +40,14 @@ import {
   removeDataSource as removeDataSourceIpc,
   createDataSource as createDataSourceIpc,
   addConnector as addConnectorIpc,
+  checkGraphSupport,
+  installGraphExtension,
+  listPropertyGraphs,
+  dropPropertyGraph as dropPropertyGraphIpc,
 } from "@/lib/ipc";
-import type { DataSource, Connector } from "@/lib/types";
+import type { DataSource, Connector, PropertyGraphInfo } from "@/lib/types";
+import { CreateGraphModal } from "@/components/graph/CreateGraphModal";
+import { AlgorithmPanel } from "@/components/graph/AlgorithmPanel";
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 480;
@@ -66,6 +72,10 @@ export function AppLayout() {
   const [editingTabValue, setEditingTabValue] = useState("");
   const lastActiveDataTabRef = useRef<{ tabId: string; dataSourceId: string; viewMode?: ViewMode } | null>(null);
   const hasHydratedTabsRef = useRef(false);
+  const [graphSupported, setGraphSupported] = useState(false);
+  const [propertyGraphs, setPropertyGraphs] = useState<PropertyGraphInfo[]>([]);
+  const [showCreateGraph, setShowCreateGraph] = useState(false);
+  const [showAlgorithm, setShowAlgorithm] = useState<string | null>(null);
 
   const sidebarWidth = Math.max(
     SIDEBAR_MIN,
@@ -112,8 +122,41 @@ export function AppLayout() {
     };
   }, []);
 
+  const refreshGraphs = useCallback(async () => {
+    try {
+      const supported = await checkGraphSupport();
+      setGraphSupported(supported);
+      if (supported) {
+        const graphs = await listPropertyGraphs();
+        setPropertyGraphs(graphs);
+      }
+    } catch {
+      setGraphSupported(false);
+    }
+  }, []);
+
+  const handleCreateGraph = useCallback(async () => {
+    if (graphSupported) {
+      setShowCreateGraph(true);
+      return;
+    }
+    try {
+      await installGraphExtension();
+      setGraphSupported(true);
+      setShowCreateGraph(true);
+    } catch (e) {
+      console.error("Failed to install DuckPGQ:", e);
+      alert(
+        "Could not install the DuckPGQ graph extension.\n\n" +
+        "This requires an active internet connection to download the extension from the DuckDB community repository.\n\n" +
+        "Please check your connection and try again."
+      );
+    }
+  }, [graphSupported]);
+
   useEffect(() => {
     connectorsHook.loadConnectors();
+    refreshGraphs();
     listDataSources()
       .then((sources) => {
         dataset.setDataSources(sources);
@@ -392,6 +435,27 @@ export function AppLayout() {
     [tabs]
   );
 
+  const handleGraphQuery = useCallback(
+    (graphName: string) => {
+      const sql = `FROM GRAPH_TABLE (${graphName}\n    MATCH (a)-[e]->(b)\n    COLUMNS (a.*, e.*, b.*)\n)\nLIMIT 100`;
+      setQuerySql(sql);
+      tabs.openQueryTab(sql);
+    },
+    [tabs]
+  );
+
+  const handleDropGraph = useCallback(
+    async (name: string) => {
+      try {
+        await dropPropertyGraphIpc(name);
+        setPropertyGraphs((prev) => prev.filter((g) => g.name !== name));
+      } catch {
+        // silently fail
+      }
+    },
+    []
+  );
+
   const hasTabs = tabs.openTabs.length > 0;
 
   return (
@@ -406,10 +470,16 @@ export function AppLayout() {
           catalogs={connectorsHook.catalogs}
           activeSourceId={dataset.activeSource?.id ?? null}
           queryHistory={queryEngine.history}
+          propertyGraphs={propertyGraphs}
+          graphSupported={graphSupported}
           onAddDataSource={handleOpenAddSource}
           onOpenQueryConsole={handleOpenQueryConsole}
           onAddFolder={handleAddFolder}
           onAddFromUrl={handleAddFromUrl}
+          onCreateGraph={handleCreateGraph}
+          onDropGraph={handleDropGraph}
+          onGraphQuery={handleGraphQuery}
+          onRunAlgorithm={(name) => setShowAlgorithm(name)}
           onDataSourceSelect={handleDataSourceSelect}
           onDataSourceRemove={handleRemoveDataSource}
           onConnectorRemove={handleRemoveConnector}
@@ -590,8 +660,12 @@ export function AppLayout() {
                   executionTimeMs={queryEngine.executionTimeMs}
                   page={queryEngine.page}
                   pageSize={queryEngine.pageSize}
+                  resultView={activeQueryTab.resultView ?? "table"}
                   onPageChange={queryEngine.changePage}
                   onPageSizeChange={queryEngine.changePageSize}
+                  onResultViewChange={(view) =>
+                    tabs.updateTab(activeQueryTab.id, { resultView: view })
+                  }
                 />
               </div>
             </div>
@@ -678,6 +752,22 @@ export function AppLayout() {
             setShowAddFromUrl(false);
           }}
           onAddConnector={connectorsHook.addConnector}
+        />
+      )}
+
+      <CreateGraphModal
+        open={showCreateGraph}
+        onOpenChange={setShowCreateGraph}
+        dataSources={dataset.dataSources}
+        onCreated={refreshGraphs}
+      />
+
+      {showAlgorithm && (
+        <AlgorithmPanel
+          open={!!showAlgorithm}
+          onOpenChange={(open: boolean) => { if (!open) setShowAlgorithm(null); }}
+          graphName={showAlgorithm}
+          propertyGraphs={propertyGraphs}
         />
       )}
     </div>

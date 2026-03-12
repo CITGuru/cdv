@@ -49,6 +49,10 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+fn is_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
+}
+
 fn ensure_extension(conn: &Connection, ext: &str) -> Result<(), AppError> {
     conn.execute_batch(&format!("INSTALL '{}'; LOAD '{}';", ext, ext))
         .map_err(|e| {
@@ -94,7 +98,7 @@ impl ConnectorOps for FileOps {
             .path
             .as_deref()
             .unwrap_or("");
-        if path.starts_with("http://") || path.starts_with("https://") {
+        if is_url(path) {
             ensure_extension(conn, "httpfs")?;
         }
         Ok(())
@@ -145,7 +149,7 @@ impl ConnectorOps for FileOps {
             .path
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("File connector missing path".into()))?;
-        if path.starts_with("s3://") || path.starts_with("gcs://") || path.starts_with("https://")
+        if path.starts_with("s3://") || path.starts_with("gcs://") || is_url(path)
         {
             return Ok(());
         }
@@ -331,6 +335,9 @@ impl ConnectorOps for SqliteOps {
             .path
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("SQLite connector missing path".into()))?;
+        if is_url(path) {
+            ensure_extension(conn, "httpfs")?;
+        }
         let alias = connector
             .alias
             .as_deref()
@@ -373,7 +380,7 @@ impl ConnectorOps for SqliteOps {
             .path
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("SQLite connector missing path".into()))?;
-        if !Path::new(path).exists() {
+        if !is_url(path) && !Path::new(path).exists() {
             return Err(AppError::ConnectorError(format!(
                 "SQLite file not found: {}",
                 path
@@ -396,6 +403,9 @@ impl ConnectorOps for DuckDBOps {
             .path
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("DuckDB connector missing path".into()))?;
+        if is_url(path) {
+            ensure_extension(conn, "httpfs")?;
+        }
         let alias = connector
             .alias
             .as_deref()
@@ -438,7 +448,7 @@ impl ConnectorOps for DuckDBOps {
             .path
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("DuckDB connector missing path".into()))?;
-        if !Path::new(path).exists() {
+        if !is_url(path) && !Path::new(path).exists() {
             return Err(AppError::ConnectorError(format!(
                 "DuckDB file not found: {}",
                 path

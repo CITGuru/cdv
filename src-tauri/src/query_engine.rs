@@ -21,20 +21,38 @@ pub fn batches_to_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<V
     Ok(buf)
 }
 
+fn is_select_like(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let upper: String = trimmed.chars().take(10).collect::<String>().to_uppercase();
+    upper.starts_with("SELECT")
+        || upper.starts_with("WITH")
+        || upper.starts_with("FROM")
+        || upper.starts_with("TABLE")
+        || upper.starts_with("SHOW")
+        || upper.starts_with("DESCRIBE")
+        || upper.starts_with("EXPLAIN")
+        || upper.starts_with("PRAGMA")
+        || upper.starts_with("CALL")
+}
+
 #[tauri::command]
 pub fn run_query(sql: String, state: State<'_, AppState>) -> Result<Vec<u8>, AppError> {
-    let batches: Vec<RecordBatch> = {
-        let conn = state.conn.lock();
+    let conn = state.conn.lock();
+
+    if is_select_like(&sql) {
         let mut stmt = conn.prepare(&sql)?;
         let frames = stmt.query_arrow(params![])?;
-        frames.collect()
-    };
+        let batches: Vec<RecordBatch> = frames.collect();
 
-    if batches.is_empty() {
-        return Ok(Vec::new());
+        if batches.is_empty() {
+            return Ok(Vec::new());
+        }
+        return batches_to_ipc(&batches[0].schema(), &batches);
     }
 
-    batches_to_ipc(&batches[0].schema(), &batches)
+    conn.execute_batch(&sql)
+        .map_err(|e| AppError::QueryError(e.to_string()))?;
+    Ok(Vec::new())
 }
 
 #[tauri::command]
@@ -44,6 +62,10 @@ pub fn run_paginated_query(
     page_size: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<u8>, AppError> {
+    if !is_select_like(&sql) {
+        return run_query(sql, state);
+    }
+
     let offset = page * page_size;
     let paginated_sql = format!(
         "SELECT * FROM ({}) AS _sub LIMIT {} OFFSET {}",
@@ -71,6 +93,14 @@ pub fn stream_query(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let conn = state.conn.lock();
+
+    if !is_select_like(&sql) {
+        conn.execute_batch(&sql)
+            .map_err(|e| AppError::QueryError(e.to_string()))?;
+        let _ = app_handle.emit("query-complete", ());
+        return Ok(());
+    }
+
     let mut stmt = conn.prepare(&sql)?;
     let mut frames = stmt.query_arrow(params![])?;
 

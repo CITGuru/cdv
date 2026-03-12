@@ -146,6 +146,32 @@ fn default_kind() -> String {
     "view".to_string()
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VertexTableDef {
+    pub table_name: String,
+    pub key_column: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EdgeTableDef {
+    pub table_name: String,
+    pub source_key: String,
+    pub source_vertex_table: String,
+    pub source_vertex_key: String,
+    pub destination_key: String,
+    pub destination_vertex_table: String,
+    pub destination_vertex_key: String,
+    pub label: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PropertyGraphInfo {
+    pub name: String,
+    pub vertex_tables: Vec<String>,
+    pub edge_tables: Vec<String>,
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct FilePreview {
     pub format: String,
@@ -162,6 +188,7 @@ pub struct AppState {
     pub settings_path: PathBuf,
     #[allow(clippy::type_complexity)]
     pub settings_cache: Mutex<Option<crate::settings::Settings>>,
+    pub graph_enabled: Mutex<bool>,
 }
 
 impl AppState {
@@ -170,6 +197,11 @@ impl AppState {
             Connection::open_in_memory().expect("Failed to open DuckDB in-memory connection");
         conn.execute_batch("INSTALL excel; LOAD excel;")
             .expect("Failed to load Excel extension");
+        let graph_ok =
+            conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;").is_ok();
+        if !graph_ok {
+            eprintln!("DuckPGQ extension unavailable (in-memory mode)");
+        }
         AppState {
             conn: Mutex::new(conn),
             data_sources: Mutex::new(HashMap::new()),
@@ -177,6 +209,7 @@ impl AppState {
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
+            graph_enabled: Mutex::new(graph_ok),
         }
     }
 
@@ -190,6 +223,11 @@ impl AppState {
         }
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("INSTALL excel; LOAD excel;")?;
+        let graph_ok =
+            conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;").is_ok();
+        if !graph_ok {
+            eprintln!("DuckPGQ extension unavailable");
+        }
         Ok(AppState {
             conn: Mutex::new(conn),
             data_sources: Mutex::new(HashMap::new()),
@@ -197,6 +235,7 @@ impl AppState {
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),
+            graph_enabled: Mutex::new(graph_ok),
         })
     }
 }

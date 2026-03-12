@@ -7,6 +7,7 @@ export type ErrorCategory =
   | "auth_error"
   | "export_error"
   | "connector_error"
+  | "graph_error"
   | "unknown";
 
 export interface ParsedError {
@@ -189,6 +190,22 @@ function classifyError(
         "Check your connection settings (host, port, credentials)",
         "Ensure the target database or file is accessible",
         "The required DuckDB extension may need network access to install",
+      ],
+    };
+  }
+
+  if (
+    code === "GRAPH_ERROR" ||
+    lower.includes("property graph") ||
+    lower.includes("duckpgq")
+  ) {
+    return {
+      category: "graph_error",
+      title: "Graph Error",
+      suggestions: [
+        "Ensure the DuckPGQ extension loaded successfully",
+        "Verify the property graph exists and the vertex/edge tables are valid",
+        "Check that vertex and edge table columns match the graph definition",
       ],
     };
   }

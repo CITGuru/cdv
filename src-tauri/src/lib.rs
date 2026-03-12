@@ -4,6 +4,7 @@ mod connector;
 mod dataset_manager;
 mod error;
 mod export_service;
+mod graph;
 mod query_engine;
 mod settings;
 mod state;
@@ -97,6 +98,13 @@ pub fn run() {
             settings::set_settings,
             workspace::get_persisted_tabs,
             workspace::set_persisted_tabs,
+            graph::check_graph_support,
+            graph::install_graph_extension,
+            graph::create_property_graph,
+            graph::list_property_graphs,
+            graph::drop_property_graph,
+            graph::get_property_graph_info,
+            graph::run_graph_algorithm,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

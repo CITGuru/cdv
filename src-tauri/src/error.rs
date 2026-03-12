@@ -7,6 +7,7 @@ pub enum AppError {
     AuthError(String),
     ExportError(String),
     ConnectorError(String),
+    GraphError(String),
 }
 
 impl AppError {
@@ -17,6 +18,7 @@ impl AppError {
             AppError::AuthError(msg) => msg,
             AppError::ExportError(msg) => msg,
             AppError::ConnectorError(msg) => msg,
+            AppError::GraphError(msg) => msg,
         }
     }
 
@@ -27,6 +29,7 @@ impl AppError {
             AppError::AuthError(_) => "AUTH_ERROR",
             AppError::ExportError(_) => "EXPORT_ERROR",
             AppError::ConnectorError(_) => "CONNECTOR_ERROR",
+            AppError::GraphError(_) => "GRAPH_ERROR",
         }
     }
 }

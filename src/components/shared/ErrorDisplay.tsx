@@ -72,6 +72,12 @@ const CATEGORY_CONFIG: Record<
     bg: "bg-orange-500/10",
     border: "border-orange-500/30",
   },
+  graph_error: {
+    icon: AlertCircle,
+    color: "text-cyan-400",
+    bg: "bg-cyan-500/10",
+    border: "border-cyan-500/30",
+  },
   unknown: {
     icon: AlertCircle,
     color: "text-destructive",

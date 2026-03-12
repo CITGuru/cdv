@@ -111,8 +111,39 @@ export interface QueryResult {
 export interface AppError {
   error: true;
   message: string;
-  code: "FILE_ERROR" | "QUERY_ERROR" | "AUTH_ERROR" | "EXPORT_ERROR" | "CONNECTOR_ERROR";
+  code: "FILE_ERROR" | "QUERY_ERROR" | "AUTH_ERROR" | "EXPORT_ERROR" | "CONNECTOR_ERROR" | "GRAPH_ERROR";
 }
+
+export interface VertexTableDef {
+  table_name: string;
+  key_column?: string | null;
+  label?: string | null;
+}
+
+export interface EdgeTableDef {
+  table_name: string;
+  source_key: string;
+  source_vertex_table: string;
+  source_vertex_key: string;
+  destination_key: string;
+  destination_vertex_table: string;
+  destination_vertex_key: string;
+  label?: string | null;
+}
+
+export interface PropertyGraphInfo {
+  name: string;
+  vertex_tables: string[];
+  edge_tables: string[];
+}
+
+export type GraphAlgorithm = "pagerank" | "local_clustering_coefficient" | "weakly_connected_component";
+
+export const GRAPH_ALGORITHMS: { value: GraphAlgorithm; label: string }[] = [
+  { value: "pagerank", label: "PageRank" },
+  { value: "local_clustering_coefficient", label: "Local Clustering Coefficient" },
+  { value: "weakly_connected_component", label: "Weakly Connected Component" },
+];
 
 export interface PaginationState {
   page: number;

@@ -572,14 +572,16 @@ export function AddDataSourceModal({
   const handleConnectDatabase = async () => {
     const { file } = form.getValues();
     let { name } = form.getValues();
-    if (!file.path) return;
+    const url = file.url?.trim();
+    const path = file.path || url;
+    if (!path) return;
     if (!name.trim()) {
-      const base = fileBaseName(file.path).replace(/\.[^.]+$/, "");
+      const base = fileBaseName(path).replace(/\.[^.]+$/, "").replace(/\?.*$/, "");
       name = base;
       form.setValue("name", base, { shouldDirty: true });
       form.setValue("viewName", nameToViewName(base), { shouldDirty: true });
     }
-    const isDuckdb = file.path.toLowerCase().endsWith(".duckdb");
+    const isDuckdb = sourceType === "duckdb" || path.toLowerCase().endsWith(".duckdb");
     setLoading(true);
     setError(null);
     try {
@@ -587,7 +589,7 @@ export function AddDataSourceModal({
         const conn = await onAddConnector({
           name: name.trim(),
           connectorType: isDuckdb ? "duckdb" : "sqlite",
-          config: { path: file.path },
+          config: { path },
         });
         setDbConnectorId(conn.id);
         const entries = await introspectConnector(conn.id);
@@ -750,13 +752,13 @@ export function AddDataSourceModal({
   };
 
   const handleTestDb = async () => {
-    const fp = form.getValues("file.path");
+    const fp = form.getValues("file.path") || form.getValues("file.url")?.trim();
     if (!fp) return;
     setTesting(true);
     setError(null);
     setTestSuccess(false);
     setTestResultText(null);
-    const isDuckdb = fp.toLowerCase().endsWith(".duckdb");
+    const isDuckdb = sourceType === "duckdb" || fp.toLowerCase().endsWith(".duckdb");
     try {
       if (onTestConnector) {
         await onTestConnector({
@@ -815,7 +817,7 @@ export function AddDataSourceModal({
   // ──── Computed values ────
 
   const canTest = (sourceType === "postgresql" || sourceType === "snowflake") && !!dbHost && !!dbDatabase;
-  const canTestDb = (sourceType === "sqlite" || sourceType === "duckdb") && !!filePath;
+  const canTestDb = (sourceType === "sqlite" || sourceType === "duckdb") && !!(filePath || fileUrl);
 
   const handleSourceConnect = () => {
     if (sourceType === "postgresql") handleConnectPostgres();
@@ -924,7 +926,7 @@ export function AddDataSourceModal({
                   (sourceType === "columnar" && !filePath && !(fileUrl ?? "").trim()) ||
                   (sourceType === "postgresql" && (!dbHost || !dbDatabase)) ||
                   (sourceType === "snowflake" && (!dbHost || !dbDatabase)) ||
-                  ((sourceType === "sqlite" || sourceType === "duckdb") && !filePath)
+                  ((sourceType === "sqlite" || sourceType === "duckdb") && !filePath && !(fileUrl ?? "").trim())
                 }
               >
                 {loading ? "Connecting..." : sourceType === "columnar" ? "Next" : "OK"}
@@ -1095,6 +1097,7 @@ function SourceStep({
   const sourceType = form.watch("sourceType");
   const driver = form.watch("driver");
   const filePath = form.watch("file.path");
+  const fileUrl = form.watch("file.url");
   const dbAuthMode = form.watch("db.authMode");
   const cloudConnectionId = form.watch("cloud.connectionId");
 
@@ -1165,9 +1168,9 @@ function SourceStep({
         {/* ───── SQLite / DuckDB ───── */}
         {isDbFile && (
           <>
-            {!filePath ? (
+            {!filePath && !fileUrl ? (
               <DatabaseDropZone onPickFile={onPickDatabaseFile} loading={loading} />
-            ) : (
+            ) : filePath ? (
               <>
                 <FormRow label="File:">
                   <div className="flex gap-1.5 items-center">
@@ -1175,18 +1178,33 @@ function SourceStep({
                     <Button onClick={onPickDatabaseFile} variant="ghost" size="sm" className="h-8 px-2 shrink-0">...</Button>
                   </div>
                 </FormRow>
-                <FormRow label="URL:">
+                <FormRow label="Connection:">
                   <div>
                     <Input
                       readOnly
                       value={sourceType === "duckdb" ? `duckdb:duckdb:${filePath}` : `duckdb:sqlite:${filePath}`}
                       className="font-mono text-xs bg-muted"
                     />
-                    <p className="text-[10px] text-muted-foreground mt-0.5">Overrides settings above</p>
                   </div>
                 </FormRow>
               </>
-            )}
+            ) : null}
+
+            <div className="relative flex items-center gap-2 my-1">
+              <Separator className="flex-1" />
+              <span className="text-[10px] text-muted-foreground px-2 uppercase tracking-wider">or load from URL</span>
+              <Separator className="flex-1" />
+            </div>
+
+            <FormRow label="URL:">
+              <Input
+                type="url"
+                {...form.register("file.url")}
+                placeholder={sourceType === "duckdb" ? "https://example.com/data.duckdb" : "https://example.com/data.sqlite"}
+                className="font-mono text-xs"
+                disabled={loading}
+              />
+            </FormRow>
           </>
         )}
 

@@ -7,6 +7,9 @@ import {
   ChevronLast,
   ChevronLeft,
   ChevronRight,
+  Table2,
+  Network,
+  CheckCircle2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,8 +22,10 @@ import {
 } from "@/components/ui/select";
 import type { QueryResult } from "@/lib/types";
 import type { ParsedError } from "@/lib/errors";
+import type { ResultViewMode } from "@/hooks/useWorkspaceTabs";
 import { DataTable } from "@/components/dataset/DataTable";
 import { ErrorDisplay } from "@/components/shared/ErrorDisplay";
+import { GraphResultView } from "@/components/graph/GraphResultView";
 
 interface ResultsTableProps {
   result: QueryResult | null;
@@ -29,8 +34,10 @@ interface ResultsTableProps {
   executionTimeMs: number | null;
   page: number;
   pageSize: number;
+  resultView?: ResultViewMode;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
+  onResultViewChange?: (view: ResultViewMode) => void;
 }
 
 export function ResultsTable({
@@ -40,8 +47,10 @@ export function ResultsTable({
   executionTimeMs,
   page,
   pageSize,
+  resultView = "table",
   onPageChange,
   onPageSizeChange,
+  onResultViewChange,
 }: ResultsTableProps) {
   if (error) {
     return (
@@ -75,6 +84,8 @@ export function ResultsTable({
   }
 
   const hasFullPage = result != null && result.rows.length >= pageSize;
+  const showGraph = resultView === "graph";
+  const isDdlResult = result != null && result.columns.length === 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -87,14 +98,46 @@ export function ResultsTable({
             </div>
           </div>
         )}
-        {result && (
+        {isDdlResult && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
+            <CheckCircle2 className="size-8 text-emerald-500 opacity-80" />
+            <span className="text-sm font-medium text-foreground">Statement executed successfully</span>
+            {executionTimeMs !== null && (
+              <span className="text-xs">Completed in {executionTimeMs}ms</span>
+            )}
+          </div>
+        )}
+        {result && !isDdlResult && !showGraph && (
           <DataTable columns={result.columns} rows={result.rows} />
+        )}
+        {result && !isDdlResult && showGraph && (
+          <GraphResultView columns={result.columns} rows={result.rows} />
         )}
       </div>
 
       {result && (
         <div className="flex items-center justify-between px-3 py-1.5 border-t border-border bg-card text-xs text-muted-foreground shrink-0">
           <div className="flex items-center gap-2">
+            {onResultViewChange && (
+              <div className="flex items-center gap-0.5 mr-2 border border-border rounded-md p-0.5">
+                <Button
+                  variant={!showGraph ? "secondary" : "ghost"}
+                  size="icon-xs"
+                  onClick={() => onResultViewChange("table")}
+                  className="h-5 w-6"
+                >
+                  <Table2 className="size-3" />
+                </Button>
+                <Button
+                  variant={showGraph ? "secondary" : "ghost"}
+                  size="icon-xs"
+                  onClick={() => onResultViewChange("graph")}
+                  className="h-5 w-6"
+                >
+                  <Network className="size-3" />
+                </Button>
+              </div>
+            )}
             <span>Rows per page</span>
             <Select
               value={String(pageSize)}
