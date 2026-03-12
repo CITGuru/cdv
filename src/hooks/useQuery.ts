@@ -41,6 +41,8 @@ export function useQueryEngine() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const tabStatesRef = useRef(tabStates);
+  tabStatesRef.current = tabStates;
   const runningRef = useRef(false);
 
   const updateTabState = useCallback((tabId: string, patch: Partial<TabQueryState>) => {
@@ -148,7 +150,7 @@ export function useQueryEngine() {
       setPageSize(newPageSize);
       const tabId = activeTabIdRef.current;
       if (!tabId) return;
-      const tabState = tabStates[tabId];
+      const tabState = tabStatesRef.current[tabId];
       if (!tabState?.lastSql) return;
       setLoading(true);
       updateTabState(tabId, { error: null, page: 0 });
@@ -162,7 +164,7 @@ export function useQueryEngine() {
         setLoading(false);
       }
     },
-    [updateTabState, tabStates]
+    [updateTabState]
   );
 
   const clearTabState = useCallback((tabId: string) => {

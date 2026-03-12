@@ -94,7 +94,7 @@ export async function runPaginatedQuery(
   page: number,
   pageSize: number
 ): Promise<number[]> {
-  return invoke("run_paginated_query", { sql, page, pageSize });
+  return invoke("run_paginated_query", { sql, page, page_size: pageSize });
 }
 
 export async function streamQuery(sql: string): Promise<void> {
