@@ -489,9 +489,34 @@ pub fn refresh_data_source(id: String, state: State<'_, AppState>) -> Result<Dat
         .ok_or_else(|| AppError::FileError("Connector missing format".into()))?;
 
     let (_, duckdb_ref) = format_to_ref(path, format)?;
+
+    let is_local = !path.starts_with("s3://")
+        && !path.starts_with("gcs://")
+        && !path.starts_with("http://")
+        && !path.starts_with("https://");
+
+    if ds.kind == "table" && is_local && !Path::new(path).exists() {
+        return Err(AppError::FileError(format!(
+            "Source file not found: {}. Materialized table was not modified.",
+            path
+        )));
+    }
+
     let conn = state.conn.lock();
 
     if ds.kind == "table" {
+        let probe_sql = format!("SELECT 1 FROM {} LIMIT 1", duckdb_ref);
+        conn.prepare(&probe_sql)
+            .and_then(|mut s| {
+                let _: Vec<duckdb::arrow::record_batch::RecordBatch> =
+                    s.query_arrow(duckdb::params![])?.collect();
+                Ok(())
+            })
+            .map_err(|e| AppError::FileError(format!(
+                "Source is unreachable: {}. Materialized table was not modified.",
+                e
+            )))?;
+
         let sql = format!(
             "CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM {}",
             view_name, duckdb_ref
