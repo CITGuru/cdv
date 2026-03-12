@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { DataSource, QueryResult, PaginationState } from "../lib/types";
 import type { ParsedError } from "../lib/errors";
 import { extractError } from "../lib/errors";
-import { runPaginatedQuery } from "../lib/ipc";
+import { runPaginatedQuery, refreshDataSource } from "../lib/ipc";
 import { decodeArrowIPC } from "../lib/arrow";
 import type { ViewMode } from "./useWorkspaceTabs";
 
@@ -128,6 +128,41 @@ export function useDataset() {
     }
   }, [activeSource?.id, invalidateCacheForSource]);
 
+  const refreshSource = useCallback(
+    async (ds: DataSource) => {
+      invalidateCacheForSource(ds.id);
+      setError(null);
+      setLoading(true);
+      try {
+        const updated = await refreshDataSource(ds.id);
+        setDataSources((prev) =>
+          prev.map((d) => (d.id === updated.id ? updated : d))
+        );
+        setActiveSource(updated);
+        setPagination((p) => ({
+          ...p,
+          page: 0,
+          totalRows: updated.row_count,
+        }));
+
+        const sql = `SELECT * FROM ${updated.qualified_name}`;
+        const ipcData = await runPaginatedQuery(sql, 0, pagination.pageSize);
+        const result = decodeArrowIPC(ipcData);
+        resultCache.current.set(
+          cacheKey(updated.id, undefined, 0, pagination.pageSize),
+          result
+        );
+        evictCache();
+        setPreviewData(result);
+      } catch (e) {
+        setError(extractError(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [evictCache, invalidateCacheForSource, pagination.pageSize]
+  );
+
   const changePage = useCallback(
     async (page: number) => {
       if (!activeSource) return;
@@ -209,6 +244,7 @@ export function useDataset() {
     selectSource,
     removeSource,
     updateDataSource,
+    refreshSource,
     clearSourceView,
     changePage,
     changePageSize,

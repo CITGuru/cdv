@@ -67,6 +67,10 @@ export async function updateDataSource(
   });
 }
 
+export async function refreshDataSource(id: string): Promise<DataSource> {
+  return invoke("refresh_data_source", { id });
+}
+
 export async function listDataSources(): Promise<DataSource[]> {
   return invoke("list_data_sources");
 }

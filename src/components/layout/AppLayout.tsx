@@ -324,6 +324,13 @@ export function AppLayout() {
     await connectorsHook.refreshCatalog(id);
   }, [connectorsHook]);
 
+  const handleRefreshDataSource = useCallback(
+    (ds: DataSource) => {
+      dataset.refreshSource(ds);
+    },
+    [dataset]
+  );
+
   const handleOpenAddSource = useCallback(() => {
     setDropFilePath(undefined);
     setShowAddSource(true);
@@ -486,6 +493,7 @@ export function AppLayout() {
           onDataSourceRemove={handleRemoveDataSource}
           onConnectorRemove={handleRemoveConnector}
           onConnectorRefresh={handleRefreshConnector}
+          onDataSourceRefresh={handleRefreshDataSource}
           onQuerySelect={handleQuerySelect}
           onNewQuery={handleNewQuery}
           onOpenDataTab={handleDataSourceSelect}

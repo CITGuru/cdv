@@ -212,6 +212,7 @@ interface SidebarProps {
   onDataSourceRemove: (id: string) => void;
   onConnectorRemove: (id: string) => void;
   onConnectorRefresh?: (id: string) => void;
+  onDataSourceRefresh?: (ds: DataSource) => void;
   onQuerySelect: (sql: string) => void;
   onNewQuery?: (ds: DataSource) => void;
   onOpenDataTab?: (ds: DataSource, viewMode?: ViewMode) => void;
@@ -244,6 +245,7 @@ export function Sidebar({
   onDataSourceRemove,
   onConnectorRemove,
   onConnectorRefresh,
+  onDataSourceRefresh,
   onQuerySelect,
   onNewQuery,
   onOpenDataTab,
@@ -384,6 +386,7 @@ export function Sidebar({
                         onToggleExpand={() => toggleExpanded(ds.id)}
                         onSelect={onDataSourceSelect}
                         onRemove={onDataSourceRemove}
+                        onRefresh={onDataSourceRefresh}
                         onNewQuery={onNewQuery}
                         onOpenDataTab={onOpenDataTab}
                         onViewDataAsQuery={onViewDataAsQuery}
@@ -511,6 +514,7 @@ function DataSourceTreeItem({
   onToggleExpand,
   onSelect,
   onRemove,
+  onRefresh,
   onNewQuery,
   onOpenDataTab,
   onViewDataAsQuery,
@@ -525,6 +529,7 @@ function DataSourceTreeItem({
   onToggleExpand: () => void;
   onSelect: (ds: DataSource, viewMode?: ViewMode) => void;
   onRemove: (id: string) => void;
+  onRefresh?: (ds: DataSource) => void;
   onNewQuery?: (ds: DataSource) => void;
   onOpenDataTab?: (ds: DataSource, viewMode?: ViewMode) => void;
   onViewDataAsQuery?: (ds: DataSource, viewMode: ViewMode) => void;
@@ -633,6 +638,12 @@ function DataSourceTreeItem({
                 </ContextMenuItem>
               </ContextMenuSubContent>
             </ContextMenuSub>
+          )}
+          {onRefresh && (
+            <ContextMenuItem onSelect={() => onRefresh(source)}>
+              <RefreshCw className="size-4 mr-2" />
+              Refresh
+            </ContextMenuItem>
           )}
           <ContextMenuSeparator />
           <ContextMenuItem

@@ -451,6 +451,80 @@ pub fn update_data_source(
 }
 
 #[tauri::command]
+pub fn refresh_data_source(id: String, state: State<'_, AppState>) -> Result<DataSource, AppError> {
+    let ds = {
+        let sources = state.data_sources.lock();
+        sources
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::FileError("Data source not found".to_string()))?
+    };
+
+    if ds.kind == "external" {
+        return Ok(ds);
+    }
+
+    let view_name = ds
+        .view_name
+        .as_deref()
+        .ok_or_else(|| AppError::FileError("Data source has no view name".into()))?;
+
+    let connector = {
+        let connectors = state.connectors.lock();
+        connectors
+            .get(&ds.connector_id)
+            .cloned()
+            .ok_or_else(|| AppError::FileError("Connector not found".into()))?
+    };
+
+    let path = connector
+        .config
+        .path
+        .as_deref()
+        .ok_or_else(|| AppError::FileError("Connector missing path".into()))?;
+    let format = connector
+        .config
+        .format
+        .as_deref()
+        .ok_or_else(|| AppError::FileError("Connector missing format".into()))?;
+
+    let (_, duckdb_ref) = format_to_ref(path, format)?;
+    let conn = state.conn.lock();
+
+    if ds.kind == "table" {
+        let sql = format!(
+            "CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM {}",
+            view_name, duckdb_ref
+        );
+        conn.execute_batch(&sql)?;
+    } else {
+        let sql = format!(
+            "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM {}",
+            view_name, duckdb_ref
+        );
+        conn.execute_batch(&sql)?;
+    }
+
+    let quoted = format!("\"{}\"", view_name);
+    let schema = describe_ref(&conn, &quoted)?;
+    let row_count = count_ref(&conn, &quoted);
+
+    drop(conn);
+
+    let mut sources = state.data_sources.lock();
+    if let Some(existing) = sources.get_mut(&id) {
+        existing.schema = schema;
+        existing.row_count = row_count;
+    }
+    let updated = sources.get(&id).cloned().unwrap_or(ds);
+    drop(sources);
+
+    catalog::save_state_catalog(&state);
+
+    Ok(updated)
+}
+
+#[tauri::command]
 pub async fn download_url(
     app: tauri::AppHandle,
     url: String,
