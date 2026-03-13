@@ -4,10 +4,19 @@ use arrow::ipc::writer::StreamWriter;
 use duckdb::arrow::datatypes::Schema;
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
+use serde::Deserialize;
 use tauri::{Emitter, State};
 
 use crate::error::AppError;
 use crate::state::AppState;
+
+#[derive(Deserialize)]
+pub(crate) struct RunPaginatedQueryArgs {
+    sql: String,
+    page: u32,
+    #[serde(rename = "pageSize")]
+    page_size: u32,
+}
 
 pub fn batches_to_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<Vec<u8>, AppError> {
     let mut buf: Vec<u8> = Vec::new();
@@ -56,12 +65,8 @@ pub fn run_query(sql: String, state: State<'_, AppState>) -> Result<Vec<u8>, App
 }
 
 #[tauri::command]
-pub fn run_paginated_query(
-    sql: String,
-    page: u32,
-    page_size: u32,
-    state: State<'_, AppState>,
-) -> Result<Vec<u8>, AppError> {
+pub fn run_paginated_query(args: RunPaginatedQueryArgs, state: State<'_, AppState>) -> Result<Vec<u8>, AppError> {
+    let RunPaginatedQueryArgs { sql, page, page_size } = args;
     if !is_select_like(&sql) {
         return run_query(sql, state);
     }

@@ -222,6 +222,7 @@ export function AppLayout() {
     if (qTab?.autoExecute && qTab.initialSql?.trim()) {
       queryEngine.executeQuery(qTab.initialSql, {
         useStreaming: settings.settings.streaming_enabled,
+        tabId: qTab.id,
       });
       tabs.updateTab(qTab.id, { autoExecute: false });
     }
@@ -238,8 +239,8 @@ export function AppLayout() {
   const handleNewQuery = useCallback(
     (ds: DataSource) => {
       const ref = ds.qualified_name;
-      tabs.openQueryTab(`SELECT * FROM ${ref} LIMIT 100`);
-      setQuerySql(`SELECT * FROM ${ref} LIMIT 100`);
+      tabs.openQueryTab(`SELECT * FROM ${ref}`);
+      setQuerySql(`SELECT * FROM ${ref}`);
     },
     [tabs]
   );
@@ -249,16 +250,16 @@ export function AppLayout() {
     const total = ds.row_count ?? 0;
     switch (viewMode) {
       case "first100":
-        return `SELECT * FROM ${ref} LIMIT 100`;
+        return `SELECT * FROM ${ref}`;
       case "last100": {
         const offset = Math.max(0, total - 100);
         return `SELECT * FROM ${ref} LIMIT 100 OFFSET ${offset}`;
       }
       case "all":
-        return `SELECT * FROM ${ref} LIMIT 10000`;
+        return `SELECT * FROM ${ref}`;
       case "filtered":
       default:
-        return `SELECT * FROM ${ref} LIMIT 100`;
+        return `SELECT * FROM ${ref}`;
     }
   }
 
@@ -437,7 +438,7 @@ export function AppLayout() {
 
   const handleNewQueryFromTable = useCallback(
     (qualifiedName: string) => {
-      const sql = `SELECT * FROM ${qualifiedName} LIMIT 100`;
+      const sql = `SELECT * FROM ${qualifiedName}`;
       setQuerySql(sql);
       tabs.openQueryTab(sql);
     },
@@ -446,7 +447,7 @@ export function AppLayout() {
 
   const handleGraphQuery = useCallback(
     (graphName: string) => {
-      const sql = `FROM GRAPH_TABLE (${graphName}\n    MATCH (a)-[e]->(b)\n    COLUMNS (a.*, e.*, b.*)\n)\nLIMIT 100`;
+      const sql = `SELECT * FROM GRAPH_TABLE (${graphName}\n    MATCH (a)-[e]->(b)\n    COLUMNS (a.*, e.*, b.*)\n)`;
       setQuerySql(sql);
       tabs.openQueryTab(sql);
     },
