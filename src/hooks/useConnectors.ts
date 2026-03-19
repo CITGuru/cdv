@@ -13,7 +13,7 @@ import {
   testConnector as testConnectorIpc,
 } from "../lib/ipc";
 
-const DB_CONNECTOR_TYPES: ConnectorType[] = ["sqlite", "duckdb", "postgresql", "snowflake"];
+const DB_CONNECTOR_TYPES: ConnectorType[] = ["sqlite", "duckdb", "postgresql", "snowflake", "ducklake"];
 
 function isDbConnector(ct: ConnectorType): boolean {
   return DB_CONNECTOR_TYPES.includes(ct);

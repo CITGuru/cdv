@@ -90,6 +90,18 @@ interface HostConnectionFields {
   warehouse: string;
 }
 
+interface DuckLakeConnectionFields {
+  catalogType: "duckdb" | "postgres" | "sqlite";
+  metadataPath: string;
+  dataPath: string;
+  pgHost: string;
+  pgPort: string;
+  pgDatabase: string;
+  pgUser: string;
+  pgPassword: string;
+  readOnly: boolean;
+}
+
 interface DataSourceFormValues {
   name: string;
   comment: string;
@@ -98,6 +110,7 @@ interface DataSourceFormValues {
   file: FileConnectionFields;
   db: HostConnectionFields;
   cloud: { connectionId: string };
+  ducklake: DuckLakeConnectionFields;
   viewName: string;
   materialize: boolean;
   selectedPkColumn: string | null;
@@ -118,6 +131,17 @@ const FORM_DEFAULTS: DataSourceFormValues = {
     warehouse: "",
   },
   cloud: { connectionId: "" },
+  ducklake: {
+    catalogType: "duckdb",
+    metadataPath: "",
+    dataPath: "",
+    pgHost: "localhost",
+    pgPort: "5432",
+    pgDatabase: "",
+    pgUser: "",
+    pgPassword: "",
+    readOnly: false,
+  },
   viewName: "",
   materialize: false,
   selectedPkColumn: null,
@@ -158,6 +182,7 @@ export type SourceKind =
   | "duckdb"
   | "postgresql"
   | "snowflake"
+  | "ducklake"
   | "connection";
 
 const SOURCE_TYPE_OPTIONS: { value: SourceKind; label: string }[] = [
@@ -166,6 +191,7 @@ const SOURCE_TYPE_OPTIONS: { value: SourceKind; label: string }[] = [
   { value: "duckdb", label: "DuckDB" },
   { value: "postgresql", label: "PostgreSQL" },
   { value: "snowflake", label: "Snowflake" },
+  { value: "ducklake", label: "DuckLake" },
   { value: "connection", label: "Cloud (S3 / GCS / R2)" },
 ];
 
@@ -187,6 +213,7 @@ function sourceKindToConnectorType(sk: SourceKind): ConnectorType {
     case "duckdb": return "duckdb";
     case "postgresql": return "postgresql";
     case "snowflake": return "snowflake";
+    case "ducklake": return "ducklake";
     case "connection": return "s3";
     default: return "local_file";
   }
@@ -364,6 +391,7 @@ export function AddDataSourceModal({
     form.setValue("file", { ...FORM_DEFAULTS.file });
     form.setValue("db", { ...FORM_DEFAULTS.db });
     form.setValue("cloud", { ...FORM_DEFAULTS.cloud });
+    form.setValue("ducklake", { ...FORM_DEFAULTS.ducklake });
     form.setValue("sourceType", newType);
     if (newType === "snowflake") form.setValue("db.port", "443");
     setPreview(null);
@@ -745,6 +773,84 @@ export function AddDataSourceModal({
     }
   };
 
+  // ──── DuckLake handlers ────
+
+  const getDuckLakeConfig = (): ConnectorConfig => {
+    const { ducklake } = form.getValues();
+    const cfg: ConnectorConfig = {
+      catalog_type: ducklake.catalogType,
+      data_path: ducklake.dataPath || undefined,
+      read_only: ducklake.readOnly || undefined,
+    };
+    if (ducklake.catalogType === "postgres") {
+      const parts = [`dbname=${ducklake.pgDatabase}`, `host=${ducklake.pgHost}`, `port=${ducklake.pgPort || "5432"}`];
+      if (ducklake.pgUser) parts.push(`user=${ducklake.pgUser}`);
+      if (ducklake.pgPassword) parts.push(`password=${ducklake.pgPassword}`);
+      cfg.metadata_path = `postgres:${parts.join(" ")}`;
+    } else if (ducklake.catalogType === "sqlite") {
+      cfg.metadata_path = `sqlite:${ducklake.metadataPath}`;
+    } else {
+      cfg.metadata_path = ducklake.metadataPath;
+    }
+    return cfg;
+  };
+
+  const handleTestDuckLake = async () => {
+    setTesting(true);
+    setError(null);
+    setTestSuccess(false);
+    setTestResultText(null);
+    try {
+      if (onTestConnector) {
+        await onTestConnector({
+          connectorType: "ducklake",
+          config: getDuckLakeConfig(),
+        });
+        const { ducklake } = form.getValues();
+        setTestSuccess(true);
+        setTestResultText(
+          [`Catalog: ${ducklake.catalogType}`, `Data Path: ${ducklake.dataPath}`, "Connection: Succeeded"].join("\n")
+        );
+        setTimeout(() => { setTestSuccess(false); setTestResultText(null); }, 8000);
+      }
+    } catch (e) {
+      setError(extractError(e));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleConnectDuckLake = async () => {
+    let { name } = form.getValues();
+    const { ducklake } = form.getValues();
+    if (!ducklake.metadataPath && ducklake.catalogType !== "postgres") return;
+    if (ducklake.catalogType === "postgres" && !ducklake.pgDatabase) return;
+    if (!name.trim()) {
+      name = ducklake.catalogType === "postgres" ? ducklake.pgDatabase : ducklake.metadataPath.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "") ?? "ducklake";
+      form.setValue("name", name, { shouldDirty: true });
+      form.setValue("viewName", nameToViewName(name), { shouldDirty: true });
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      if (onAddConnector) {
+        const conn = await onAddConnector({
+          name: name.trim(),
+          connectorType: "ducklake",
+          config: getDuckLakeConfig(),
+        });
+        setDbConnectorId(conn.id);
+        const entries = await introspectConnector(conn.id);
+        setDbCatalog(entries);
+        setStep("select-tables");
+      }
+    } catch (e) {
+      setError(extractError(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleCopyTestResult = async () => {
     if (testResultText && navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(testResultText);
@@ -816,12 +922,21 @@ export function AddDataSourceModal({
 
   // ──── Computed values ────
 
+  const ducklakeCatalogType = form.watch("ducklake.catalogType");
+  const ducklakeMetadataPath = form.watch("ducklake.metadataPath");
+  const ducklakePgDatabase = form.watch("ducklake.pgDatabase");
+  const ducklakeDataPath = form.watch("ducklake.dataPath");
+
   const canTest = (sourceType === "postgresql" || sourceType === "snowflake") && !!dbHost && !!dbDatabase;
   const canTestDb = (sourceType === "sqlite" || sourceType === "duckdb") && !!(filePath || fileUrl);
+  const canTestDuckLake = sourceType === "ducklake" && !!ducklakeDataPath && (
+    ducklakeCatalogType === "postgres" ? !!ducklakePgDatabase : !!ducklakeMetadataPath
+  );
 
   const handleSourceConnect = () => {
     if (sourceType === "postgresql") handleConnectPostgres();
     else if (sourceType === "snowflake") handleConnectSnowflake();
+    else if (sourceType === "ducklake") handleConnectDuckLake();
     else if (sourceType === "sqlite" || sourceType === "duckdb") handleConnectDatabase();
     else if (sourceType === "columnar") {
       const url = form.getValues("file.url").trim();
@@ -902,10 +1017,10 @@ export function AddDataSourceModal({
         {step === "source" && (
           <div className="shrink-0 border-t border-border px-5 py-2.5 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              {(canTest || canTestDb) && (
+              {(canTest || canTestDb || canTestDuckLake) && (
                 <button
                   type="button"
-                  onClick={canTest ? (sourceType === "snowflake" ? handleTestSnowflake : handleTestPostgres) : handleTestDb}
+                  onClick={canTestDuckLake ? handleTestDuckLake : canTest ? (sourceType === "snowflake" ? handleTestSnowflake : handleTestPostgres) : handleTestDb}
                   disabled={testing}
                   className={`text-sm font-medium transition-colors ${
                     testSuccess ? "text-green-600 dark:text-green-400" : "text-primary hover:text-primary/80"
@@ -926,7 +1041,10 @@ export function AddDataSourceModal({
                   (sourceType === "columnar" && !filePath && !(fileUrl ?? "").trim()) ||
                   (sourceType === "postgresql" && (!dbHost || !dbDatabase)) ||
                   (sourceType === "snowflake" && (!dbHost || !dbDatabase)) ||
-                  ((sourceType === "sqlite" || sourceType === "duckdb") && !filePath && !(fileUrl ?? "").trim())
+                  ((sourceType === "sqlite" || sourceType === "duckdb") && !filePath && !(fileUrl ?? "").trim()) ||
+                  (sourceType === "ducklake" && !ducklakeDataPath) ||
+                  (sourceType === "ducklake" && ducklakeCatalogType === "postgres" && !ducklakePgDatabase) ||
+                  (sourceType === "ducklake" && ducklakeCatalogType !== "postgres" && !ducklakeMetadataPath)
                 }
               >
                 {loading ? "Connecting..." : sourceType === "columnar" ? "Next" : "OK"}
@@ -1387,6 +1505,11 @@ function SourceStep({
           </>
         )}
 
+        {/* ───── DuckLake ───── */}
+        {sourceType === "ducklake" && (
+          <DuckLakeFormSection form={form} testSuccess={testSuccess} testResultText={testResultText} onCopyTestResult={onCopyTestResult} />
+        )}
+
         {/* ───── Cloud (S3/GCS/R2) ───── */}
         {sourceType === "connection" && (
           <>
@@ -1458,6 +1581,125 @@ function SourceStep({
         )}
       </div>
     </div>
+  );
+}
+
+// ──── DuckLakeFormSection ────
+
+function DuckLakeFormSection({
+  form,
+  testSuccess,
+  testResultText,
+  onCopyTestResult,
+}: {
+  form: UseFormReturn<DataSourceFormValues>;
+  testSuccess: boolean;
+  testResultText: string | null;
+  onCopyTestResult: () => void;
+}) {
+  const catalogType = form.watch("ducklake.catalogType");
+
+  return (
+    <>
+      <FormRow label="Catalog:">
+        <Select
+          value={catalogType}
+          onValueChange={(v) => {
+            form.setValue("ducklake.catalogType", v as "duckdb" | "postgres" | "sqlite");
+            form.setValue("ducklake.metadataPath", "");
+          }}
+        >
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="duckdb">DuckDB File</SelectItem>
+            <SelectItem value="postgres">PostgreSQL</SelectItem>
+            <SelectItem value="sqlite">SQLite File</SelectItem>
+          </SelectContent>
+        </Select>
+      </FormRow>
+
+      {catalogType === "duckdb" && (
+        <FormRow label="Metadata File:">
+          <Input
+            {...form.register("ducklake.metadataPath")}
+            placeholder="metadata.ducklake"
+            className="font-mono text-xs"
+          />
+        </FormRow>
+      )}
+
+      {catalogType === "sqlite" && (
+        <FormRow label="SQLite File:">
+          <Input
+            {...form.register("ducklake.metadataPath")}
+            placeholder="metadata.sqlite"
+            className="font-mono text-xs"
+          />
+        </FormRow>
+      )}
+
+      {catalogType === "postgres" && (
+        <>
+          <div className="flex gap-3">
+            <FormRow label="Host:" className="flex-1">
+              <Input {...form.register("ducklake.pgHost")} placeholder="localhost" className="font-mono" />
+            </FormRow>
+            <div className="w-24 shrink-0 space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Port:</Label>
+              <Input {...form.register("ducklake.pgPort")} placeholder="5432" className="font-mono" />
+            </div>
+          </div>
+          <FormRow label="Database:">
+            <Input {...form.register("ducklake.pgDatabase")} placeholder="ducklake_catalog" className="font-mono" />
+          </FormRow>
+          <FormRow label="User:">
+            <Input {...form.register("ducklake.pgUser")} placeholder="" className="font-mono" />
+          </FormRow>
+          <FormRow label="Password:">
+            <Input type="password" {...form.register("ducklake.pgPassword")} placeholder="" className="font-mono" />
+          </FormRow>
+        </>
+      )}
+
+      <Separator />
+
+      <FormRow label="Data Path:">
+        <div>
+          <Input
+            {...form.register("ducklake.dataPath")}
+            placeholder="data_files/ or s3://my-bucket/data/"
+            className="font-mono text-xs"
+          />
+          <p className="text-[10px] text-muted-foreground mt-0.5">
+            Local directory or S3/GCS URL where data files are stored
+          </p>
+        </div>
+      </FormRow>
+
+      <FormRow label="">
+        <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={form.watch("ducklake.readOnly")}
+            onChange={(e) => form.setValue("ducklake.readOnly", e.target.checked)}
+            className="accent-primary h-3.5 w-3.5 rounded"
+          />
+          <span className="text-muted-foreground">Read-only mode</span>
+        </label>
+      </FormRow>
+
+      {testSuccess && testResultText && (
+        <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-green-600 dark:text-green-400">Succeeded</span>
+            <Button variant="ghost" size="sm" className="h-7 gap-1" onClick={onCopyTestResult}>
+              <Copy className="size-3.5" /> Copy
+            </Button>
+          </div>
+          <pre className="text-xs text-muted-foreground whitespace-pre-wrap font-mono">{testResultText}</pre>
+        </div>
+      )}
+    </>
   );
 }
 

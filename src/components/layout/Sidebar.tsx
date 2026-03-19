@@ -115,6 +115,8 @@ function getConnectorIcon(connector: Connector): IconComponent {
       return PostgresqlIcon;
     case "snowflake":
       return SnowflakeIcon;
+    case "ducklake":
+      return DuckDbIcon;
     case "s3":
       return AmazonS3Icon;
     case "gcs":
@@ -136,6 +138,8 @@ function getConnectorLabel(connector: Connector): string {
       return "PostgreSQL";
     case "snowflake":
       return "Snowflake";
+    case "ducklake":
+      return "DuckLake";
     case "s3":
       return "S3";
     case "gcs":
@@ -157,6 +161,8 @@ function getConnectorIconColor(connector: Connector): string {
       return "text-[#4169E1]";
     case "snowflake":
       return "text-cyan-400";
+    case "ducklake":
+      return "text-emerald-600";
     case "s3":
       return "text-amber-500";
     case "gcs":
@@ -275,7 +281,7 @@ export function Sidebar({
       const type = conn.connector_type;
       if (type === "local_file") {
         return { kind: "file" as const, connector: conn, dataSources: dsForConn };
-      } else if (["sqlite", "duckdb", "postgresql", "snowflake"].includes(type)) {
+      } else if (["sqlite", "duckdb", "postgresql", "snowflake", "ducklake"].includes(type)) {
         return { kind: "db" as const, connector: conn, dataSources: dsForConn };
       } else {
         return { kind: "cloud" as const, connector: conn, dataSources: dsForConn };
@@ -806,52 +812,93 @@ function DatabaseConnectorItem({
                         ds.connector_id === connector.id &&
                         ds.qualified_name.includes(entry.name)
                     );
+                    const tableKey = `table-${connector.id}-${schemaName}-${entry.name}`;
+                    const tableExpanded = expandedIds.has(tableKey);
+                    const hasColumns = entry.columns && entry.columns.length > 0;
                     return (
-                      <ContextMenu key={entry.name}>
-                        <ContextMenuTrigger asChild>
-                          <button
-                            className={`flex items-center gap-2 py-0.5 pl-5 pr-2 rounded text-xs min-w-0 w-full text-left hover:bg-sidebar-accent/50 ${
-                              existingDs && activeSourceId === existingDs.id
-                                ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                                : "text-sidebar-foreground/90"
-                            }`}
-                            onClick={() => {
-                              if (existingDs && onDataSourceSelect) {
-                                onDataSourceSelect(existingDs);
-                              }
-                            }}
-                          >
-                            <Table2 className="size-3 shrink-0 text-muted-foreground/80" />
-                            <span className="font-mono truncate text-[11px]">{entry.name}</span>
-                            <span className="text-[10px] text-muted-foreground shrink-0">
-                              {entry.entry_type}
-                            </span>
-                          </button>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent className="w-48">
-                          {onNewQuery && connector.alias && (
-                            <ContextMenuItem
-                              onSelect={() => {
-                                const qn = `"${connector.alias}"."${schemaName}"."${entry.name}"`;
-                                onNewQuery(qn);
-                              }}
+                      <div key={entry.name} className="flex flex-col">
+                        <ContextMenu>
+                          <ContextMenuTrigger asChild>
+                            <div
+                              className={`flex items-center gap-0.5 py-0.5 pr-2 rounded text-xs min-w-0 w-full text-left hover:bg-sidebar-accent/50 ${
+                                existingDs && activeSourceId === existingDs.id
+                                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                                  : "text-sidebar-foreground/90"
+                              }`}
                             >
-                              <TerminalSquare className="size-4 mr-2" />
-                              New Query
-                            </ContextMenuItem>
-                          )}
-                          {onImportTable && !existingDs && (
-                            <ContextMenuItem
-                              onSelect={() =>
-                                onImportTable(connector.id, schemaName, entry.name)
-                              }
-                            >
-                              <Download className="size-4 mr-2" />
-                              Import Table
-                            </ContextMenuItem>
-                          )}
-                        </ContextMenuContent>
-                      </ContextMenu>
+                              <button
+                                type="button"
+                                className="shrink-0 p-0.5 rounded hover:bg-sidebar-accent/80 flex items-center justify-center w-5 ml-1"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (hasColumns) onToggleSchemaExpand(tableKey);
+                                }}
+                              >
+                                {hasColumns ? (
+                                  tableExpanded ? (
+                                    <ChevronDown className="size-3 text-muted-foreground" />
+                                  ) : (
+                                    <ChevronRight className="size-3 text-muted-foreground" />
+                                  )
+                                ) : (
+                                  <span className="inline-block w-3" aria-hidden />
+                                )}
+                              </button>
+                              <button
+                                className="flex-1 flex items-center gap-2 py-0.5 min-w-0 text-left"
+                                onClick={() => {
+                                  if (existingDs && onDataSourceSelect) {
+                                    onDataSourceSelect(existingDs);
+                                  } else if (hasColumns) {
+                                    onToggleSchemaExpand(tableKey);
+                                  }
+                                }}
+                              >
+                                <Table2 className="size-3 shrink-0 text-muted-foreground/80" />
+                                <span className="font-mono truncate text-[11px]">{entry.name}</span>
+                                <span className="text-[10px] text-muted-foreground shrink-0">
+                                  {entry.entry_type}
+                                </span>
+                                {hasColumns && (
+                                  <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                                    {entry.columns.length}
+                                  </span>
+                                )}
+                              </button>
+                            </div>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent className="w-48">
+                            {onNewQuery && connector.alias && (
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  const qn = `"${connector.alias}"."${schemaName}"."${entry.name}"`;
+                                  onNewQuery(qn);
+                                }}
+                              >
+                                <TerminalSquare className="size-4 mr-2" />
+                                New Query
+                              </ContextMenuItem>
+                            )}
+                            {onImportTable && !existingDs && (
+                              <ContextMenuItem
+                                onSelect={() =>
+                                  onImportTable(connector.id, schemaName, entry.name)
+                                }
+                              >
+                                <Download className="size-4 mr-2" />
+                                Import Table
+                              </ContextMenuItem>
+                            )}
+                          </ContextMenuContent>
+                        </ContextMenu>
+                        {hasColumns && tableExpanded && (
+                          <div className="ml-6 pl-3 border-l border-border/50 flex flex-col py-0.5">
+                            {entry.columns.map((col) => (
+                              <ColumnTreeRow key={col.name} column={col} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
               </div>
