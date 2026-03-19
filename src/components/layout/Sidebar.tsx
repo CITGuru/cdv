@@ -892,7 +892,7 @@ function DatabaseConnectorItem({
                           </ContextMenuContent>
                         </ContextMenu>
                         {hasColumns && tableExpanded && (
-                          <div className="ml-6 pl-3 border-l border-border/50 flex flex-col py-0.5">
+                          <div className="ml-3 border-l border-border/50 flex flex-col py-0.5">
                             {entry.columns.map((col) => (
                               <ColumnTreeRow key={col.name} column={col} />
                             ))}
