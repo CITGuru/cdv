@@ -32,6 +32,8 @@ pub enum ConnectorType {
     GCS,
     #[serde(rename = "r2")]
     R2,
+    #[serde(rename = "ducklake")]
+    DuckLake,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -64,6 +66,15 @@ pub struct ConnectorConfig {
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warehouse: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -114,7 +125,8 @@ impl ConnectorType {
             | ConnectorType::SQLite
             | ConnectorType::S3
             | ConnectorType::GCS
-            | ConnectorType::R2 => &[Driver::DuckDB],
+            | ConnectorType::R2
+            | ConnectorType::DuckLake => &[Driver::DuckDB],
             ConnectorType::PostgreSQL | ConnectorType::Snowflake => &[Driver::DuckDB],
         }
     }

@@ -218,6 +218,7 @@ pub fn create_data_source(
             | ConnectorType::DuckDB
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
+            | ConnectorType::DuckLake
     );
 
     if is_db_connector {

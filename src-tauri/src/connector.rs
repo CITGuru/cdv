@@ -27,6 +27,7 @@ pub fn get_ops(ct: &ConnectorType) -> Box<dyn ConnectorOps> {
         ConnectorType::PostgreSQL => Box::new(PostgresOps),
         ConnectorType::Snowflake => Box::new(SnowflakeOps),
         ConnectorType::S3 | ConnectorType::GCS | ConnectorType::R2 => Box::new(CloudOps),
+        ConnectorType::DuckLake => Box::new(DuckLakeOps),
     }
 }
 
@@ -563,6 +564,105 @@ impl ConnectorOps for SnowflakeOps {
     }
 }
 
+// ──────────────────────────── DuckLakeOps ────────────────────────────
+
+pub struct DuckLakeOps;
+
+impl ConnectorOps for DuckLakeOps {
+    fn activate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        ensure_extension(conn, "ducklake")?;
+
+        let catalog_type = connector
+            .config
+            .catalog_type
+            .as_deref()
+            .unwrap_or("duckdb");
+        match catalog_type {
+            "postgres" => {
+                ensure_extension(conn, "postgres")?;
+            }
+            "sqlite" => {
+                ensure_extension(conn, "sqlite")?;
+            }
+            _ => {}
+        }
+
+        if let Some(dp) = &connector.config.data_path {
+            if dp.starts_with("s3://") || dp.starts_with("gcs://") {
+                ensure_extension(conn, "httpfs")?;
+            }
+        }
+
+        let metadata_path = connector
+            .config
+            .metadata_path
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("DuckLake missing metadata path".into()))?;
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("DuckLake missing alias".into()))?;
+
+        let mut params = Vec::new();
+        if let Some(dp) = &connector.config.data_path {
+            if !dp.is_empty() {
+                params.push(format!("DATA_PATH '{}'", escape_sql_string(dp)));
+                params.push("OVERRIDE_DATA_PATH true".to_string());
+            }
+        }
+        if connector.config.read_only.unwrap_or(false) {
+            params.push("READ_ONLY".to_string());
+        }
+
+        let sql = if params.is_empty() {
+            format!(
+                "ATTACH 'ducklake:{}' AS \"{}\"",
+                escape_sql_string(metadata_path),
+                alias
+            )
+        } else {
+            format!(
+                "ATTACH 'ducklake:{}' AS \"{}\" ({})",
+                escape_sql_string(metadata_path),
+                alias,
+                params.join(", ")
+            )
+        };
+
+        conn.execute_batch(&sql)
+            .map_err(|e| AppError::ConnectorError(format!("Failed to attach DuckLake: {}", e)))?;
+        Ok(())
+    }
+
+    fn deactivate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        if let Some(alias) = &connector.alias {
+            conn.execute_batch(&format!("DETACH \"{}\"", alias))
+                .map_err(|e| {
+                    AppError::ConnectorError(format!("Failed to detach DuckLake: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn introspect(
+        &self,
+        conn: &Connection,
+        connector: &Connector,
+    ) -> Result<Vec<CatalogEntry>, AppError> {
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("DuckLake missing alias".into()))?;
+        introspect_attached_duckdb(conn, alias)
+    }
+
+    fn test(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        self.activate(conn, connector)?;
+        self.deactivate(conn, connector).ok();
+        Ok(())
+    }
+}
+
 // ──────────────────────────── Shared introspection for ATTACH'd databases ────────────────────────────
 
 /// Introspect an attached DuckDB file using duckdb_tables() and duckdb_views().
@@ -704,6 +804,7 @@ pub fn add_connector(
             | ConnectorType::DuckDB
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
+            | ConnectorType::DuckLake
     );
     let alias = if needs_alias {
         Some(sanitize_alias(&name))
@@ -821,6 +922,7 @@ pub fn test_connector(
             | ConnectorType::DuckDB
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
+            | ConnectorType::DuckLake
     );
     let alias = if needs_alias {
         Some("__cdv_test__".to_string())
