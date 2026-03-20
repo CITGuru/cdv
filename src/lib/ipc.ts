@@ -14,6 +14,8 @@ import type {
   EdgeTableDef,
   PropertyGraphInfo,
   GraphAlgorithm,
+  EtlJob,
+  SyncStrategy,
 } from "./types";
 
 // ──── File preview ────
@@ -145,6 +147,20 @@ export async function listConnectors(): Promise<Connector[]> {
   return invoke("list_connectors");
 }
 
+export async function getCachedCatalogs(): Promise<Record<string, CatalogEntry[]>> {
+  return invoke("get_cached_catalogs");
+}
+
+export async function listPgDatabases(params: {
+  config: ConnectorConfig;
+  secretKey?: string;
+}): Promise<string[]> {
+  return invoke("list_pg_databases", {
+    config: params.config,
+    secretKey: params.secretKey ?? null,
+  });
+}
+
 // ──── Cloud connections (legacy compatibility wrappers) ────
 
 export type ConnectionProvider = "s3" | "gcp" | "cloudflare";
@@ -264,4 +280,62 @@ export async function getPersistedTabs(): Promise<PersistedWorkspace> {
 
 export async function setPersistedTabs(workspace: PersistedWorkspace): Promise<void> {
   return invoke("set_persisted_tabs", { workspace });
+}
+
+// ──── ETL Jobs ────
+
+export async function createEtlJob(params: {
+  name: string;
+  sourceConnectorId: string;
+  targetConnectorId: string;
+  strategy: SyncStrategy;
+  includeSchemas?: string[];
+  excludeTables?: string[];
+  skipViews?: boolean;
+  batchSize?: number;
+}): Promise<EtlJob> {
+  return invoke("create_etl_job", {
+    name: params.name,
+    sourceConnectorId: params.sourceConnectorId,
+    targetConnectorId: params.targetConnectorId,
+    strategy: params.strategy,
+    includeSchemas: params.includeSchemas ?? null,
+    excludeTables: params.excludeTables ?? null,
+    skipViews: params.skipViews ?? null,
+    batchSize: params.batchSize ?? null,
+  });
+}
+
+export async function listEtlJobs(): Promise<EtlJob[]> {
+  return invoke("list_etl_jobs");
+}
+
+export async function getEtlJob(jobId: string): Promise<EtlJob> {
+  return invoke("get_etl_job", { jobId });
+}
+
+export async function deleteEtlJob(jobId: string): Promise<void> {
+  return invoke("delete_etl_job", { jobId });
+}
+
+export async function runEtlJob(jobId: string): Promise<void> {
+  return invoke("run_etl_job", { jobId });
+}
+
+export async function cancelEtlJob(): Promise<void> {
+  return invoke("cancel_etl_job");
+}
+
+export async function previewEtlJob(params: {
+  sourceConnectorId: string;
+  includeSchemas?: string[];
+  excludeTables?: string[];
+  skipViews?: boolean;
+}): Promise<CatalogEntry[]> {
+  return invoke("preview_etl_job", {
+    sourceConnectorId: params.sourceConnectorId,
+    includeSchemas: params.includeSchemas ?? null,
+    excludeTables: params.excludeTables ?? null,
+    skipViews: params.skipViews ?? null,
+  });
 }

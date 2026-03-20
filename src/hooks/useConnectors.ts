@@ -11,6 +11,7 @@ import {
   listConnectors as listConnectorsIpc,
   introspectConnector as introspectConnectorIpc,
   testConnector as testConnectorIpc,
+  getCachedCatalogs as getCachedCatalogsIpc,
 } from "../lib/ipc";
 
 const DB_CONNECTOR_TYPES: ConnectorType[] = ["sqlite", "duckdb", "postgresql", "snowflake", "ducklake"];
@@ -22,6 +23,7 @@ function isDbConnector(ct: ConnectorType): boolean {
 export function useConnectors() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [catalogs, setCatalogs] = useState<Record<string, CatalogEntry[]>>({});
+  const [catalogLoading, setCatalogLoading] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const loadedRef = useRef(false);
 
@@ -33,22 +35,30 @@ export function useConnectors() {
       setConnectors(list);
       loadedRef.current = true;
 
-      const dbConnectors = list.filter((c) => isDbConnector(c.connector_type));
-      const results: Record<string, CatalogEntry[]> = {};
-      await Promise.allSettled(
-        dbConnectors.map(async (c) => {
-          try {
-            results[c.id] = await introspectConnectorIpc(c.id);
-          } catch {
-            results[c.id] = [];
-          }
-        })
-      );
-      setCatalogs((prev) => ({ ...prev, ...results }));
+      try {
+        const cached = await getCachedCatalogsIpc();
+        if (cached && Object.keys(cached).length > 0) {
+          setCatalogs(cached);
+        }
+      } catch {
+        // no cached data available
+      }
     } catch {
       // silently fail
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadCatalog = useCallback(async (connectorId: string) => {
+    setCatalogLoading((prev) => ({ ...prev, [connectorId]: true }));
+    try {
+      const entries = await introspectConnectorIpc(connectorId);
+      setCatalogs((prev) => ({ ...prev, [connectorId]: entries }));
+    } catch {
+      setCatalogs((prev) => ({ ...prev, [connectorId]: [] }));
+    } finally {
+      setCatalogLoading((prev) => ({ ...prev, [connectorId]: false }));
     }
   }, []);
 
@@ -88,6 +98,7 @@ export function useConnectors() {
   }, []);
 
   const refreshCatalog = useCallback(async (connectorId: string) => {
+    setCatalogLoading((prev) => ({ ...prev, [connectorId]: true }));
     try {
       const entries = await introspectConnectorIpc(connectorId);
       setCatalogs((prev) => ({ ...prev, [connectorId]: entries }));
@@ -95,6 +106,8 @@ export function useConnectors() {
     } catch {
       setCatalogs((prev) => ({ ...prev, [connectorId]: [] }));
       return [];
+    } finally {
+      setCatalogLoading((prev) => ({ ...prev, [connectorId]: false }));
     }
   }, []);
 
@@ -120,8 +133,10 @@ export function useConnectors() {
   return {
     connectors,
     catalogs,
+    catalogLoading,
     loading,
     loadConnectors,
+    loadCatalog,
     addConnector,
     removeConnector,
     refreshCatalog,

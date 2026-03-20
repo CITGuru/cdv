@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppState, Connector, ConnectorConfig, ConnectorType, DataSource, Driver};
+use crate::state::{AppState, Connector, ConnectorConfig, ConnectorType, DataSource, Driver, EtlJob};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Catalog {
@@ -11,6 +11,10 @@ pub struct Catalog {
     pub connectors: Vec<Connector>,
     #[serde(default)]
     pub data_sources: Vec<DataSource>,
+    #[serde(default)]
+    pub connector_catalogs: HashMap<String, Vec<crate::state::CatalogEntry>>,
+    #[serde(default)]
+    pub etl_jobs: Vec<EtlJob>,
 }
 
 // Legacy types for migration from the old catalog format.
@@ -158,6 +162,8 @@ fn migrate_legacy(legacy: LegacyCatalog) -> Catalog {
     Catalog {
         connectors,
         data_sources,
+        connector_catalogs: HashMap::new(),
+        etl_jobs: Vec::new(),
     }
 }
 
@@ -173,14 +179,23 @@ pub fn save_catalog(path: &Path, catalog: &Catalog) -> Result<(), std::io::Error
 pub fn catalog_from_state(
     connectors: &HashMap<String, Connector>,
     data_sources: &HashMap<String, DataSource>,
+    connector_catalogs: &HashMap<String, Vec<crate::state::CatalogEntry>>,
+    etl_jobs: &HashMap<String, EtlJob>,
 ) -> Catalog {
     Catalog {
         connectors: connectors.values().cloned().collect(),
         data_sources: data_sources.values().cloned().collect(),
+        connector_catalogs: connector_catalogs.clone(),
+        etl_jobs: etl_jobs.values().cloned().collect(),
     }
 }
 
 pub fn save_state_catalog(state: &AppState) {
-    let catalog = catalog_from_state(&state.connectors.lock(), &state.data_sources.lock());
+    let catalog = catalog_from_state(
+        &state.connectors.lock(),
+        &state.data_sources.lock(),
+        &state.connector_catalogs.lock(),
+        &state.etl_jobs.lock(),
+    );
     save_catalog(&state.catalog_path, &catalog).ok();
 }

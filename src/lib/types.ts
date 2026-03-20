@@ -178,3 +178,70 @@ export interface PersistedWorkspace {
   openTabs: PersistedTab[];
   activeTabId: string | null;
 }
+
+// ──── ETL types ────
+
+export type SyncStrategy = "full" | "incremental" | "append";
+
+export const SYNC_STRATEGIES: { value: SyncStrategy; label: string; description: string }[] = [
+  { value: "full", label: "Full Refresh", description: "Drop and recreate every run" },
+  { value: "incremental", label: "Incremental", description: "Append only new/updated rows using a replication key" },
+  { value: "append", label: "Append", description: "Always insert all rows (no dedup)" },
+];
+
+export type JobStatus = "idle" | "running" | "completed" | "failed" | "cancelled" | "partial";
+
+export type TableStatus = "pending" | "running" | "completed" | "skipped" | "failed";
+
+export interface TableSyncState {
+  schema_name: string;
+  table_name: string;
+  status: TableStatus;
+  rows_synced: number | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  replication_key: string | null;
+  replication_value: string | null;
+}
+
+export interface EtlJob {
+  id: string;
+  name: string;
+  source_connector_id: string;
+  target_connector_id: string;
+  strategy: SyncStrategy;
+  include_schemas: string[] | null;
+  exclude_tables: string[] | null;
+  skip_views: boolean;
+  batch_size: number | null;
+  status: JobStatus;
+  table_states: TableSyncState[];
+  created_at: string;
+  last_run_at: string | null;
+  last_completed_at: string | null;
+  total_rows_synced: number;
+  run_count: number;
+}
+
+export interface EtlProgressEvent {
+  job_id: string;
+  phase: string;
+  current_table_index: number;
+  total_tables: number;
+  schema_name: string;
+  table_name: string;
+  status: "running" | "done" | "failed" | "skipped";
+  rows_synced: number | null;
+  error: string | null;
+  elapsed_ms: number;
+}
+
+export interface EtlCompleteEvent {
+  job_id: string;
+  status: string;
+  tables_migrated: number;
+  tables_failed: number;
+  total_rows: number;
+  elapsed_ms: number;
+}

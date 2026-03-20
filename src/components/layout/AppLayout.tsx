@@ -48,6 +48,9 @@ import {
 import type { DataSource, Connector, PropertyGraphInfo } from "@/lib/types";
 import { CreateGraphModal } from "@/components/graph/CreateGraphModal";
 import { AlgorithmPanel } from "@/components/graph/AlgorithmPanel";
+import { useEtlJobs } from "@/hooks/useEtlJobs";
+import { EtlJobModal } from "@/components/etl/EtlJobModal";
+import { EtlProgress } from "@/components/etl/EtlProgress";
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 480;
@@ -76,6 +79,11 @@ export function AppLayout() {
   const [propertyGraphs, setPropertyGraphs] = useState<PropertyGraphInfo[]>([]);
   const [showCreateGraph, setShowCreateGraph] = useState(false);
   const [showAlgorithm, setShowAlgorithm] = useState<string | null>(null);
+
+  const etlHook = useEtlJobs();
+  const [showEtlModal, setShowEtlModal] = useState(false);
+  const [showEtlProgress, setShowEtlProgress] = useState(false);
+  const [activeEtlJobId, setActiveEtlJobId] = useState<string | null>(null);
 
   const sidebarWidth = Math.max(
     SIDEBAR_MIN,
@@ -157,6 +165,7 @@ export function AppLayout() {
   useEffect(() => {
     connectorsHook.loadConnectors();
     refreshGraphs();
+    etlHook.loadJobs();
     listDataSources()
       .then((sources) => {
         dataset.setDataSources(sources);
@@ -325,6 +334,10 @@ export function AppLayout() {
     await connectorsHook.refreshCatalog(id);
   }, [connectorsHook]);
 
+  const handleConnectorExpand = useCallback(async (connectorId: string) => {
+    await connectorsHook.loadCatalog(connectorId);
+  }, [connectorsHook]);
+
   const handleRefreshDataSource = useCallback(
     (ds: DataSource) => {
       dataset.refreshSource(ds);
@@ -466,6 +479,48 @@ export function AppLayout() {
     []
   );
 
+  const handleCreateEtlJob = useCallback(() => setShowEtlModal(true), []);
+
+  const handleEtlSubmit = useCallback(
+    async (params: {
+      name: string;
+      sourceConnectorId: string;
+      targetConnectorId: string;
+      strategy: import("@/lib/types").SyncStrategy;
+      includeSchemas?: string[];
+      excludeTables?: string[];
+      skipViews?: boolean;
+      batchSize?: number;
+      runNow?: boolean;
+    }) => {
+      const job = await etlHook.createJob(params);
+      if (params.runNow) {
+        await etlHook.runJob(job.id);
+        setActiveEtlJobId(job.id);
+        setShowEtlProgress(true);
+      }
+    },
+    [etlHook]
+  );
+
+  const handleRunEtlJob = useCallback(
+    async (jobId: string) => {
+      await etlHook.runJob(jobId);
+      setActiveEtlJobId(jobId);
+      setShowEtlProgress(true);
+    },
+    [etlHook]
+  );
+
+  const handleViewEtlProgress = useCallback((jobId: string) => {
+    setActiveEtlJobId(jobId);
+    setShowEtlProgress(true);
+  }, []);
+
+  const activeEtlJob = activeEtlJobId
+    ? etlHook.jobs.find((j) => j.id === activeEtlJobId) ?? null
+    : null;
+
   const hasTabs = tabs.openTabs.length > 0;
 
   return (
@@ -478,6 +533,7 @@ export function AppLayout() {
           dataSources={dataset.dataSources}
           connectors={connectorsHook.connectors}
           catalogs={connectorsHook.catalogs}
+          catalogLoading={connectorsHook.catalogLoading}
           activeSourceId={dataset.activeSource?.id ?? null}
           queryHistory={queryEngine.history}
           propertyGraphs={propertyGraphs}
@@ -494,6 +550,7 @@ export function AppLayout() {
           onDataSourceRemove={handleRemoveDataSource}
           onConnectorRemove={handleRemoveConnector}
           onConnectorRefresh={handleRefreshConnector}
+          onConnectorExpand={handleConnectorExpand}
           onDataSourceRefresh={handleRefreshDataSource}
           onQuerySelect={handleQuerySelect}
           onNewQuery={handleNewQuery}
@@ -505,6 +562,13 @@ export function AppLayout() {
           onOpenSettings={() => setShowSettings(true)}
           onImportDbTable={handleImportDbTable}
           onNewQueryFromTable={handleNewQueryFromTable}
+          etlJobs={etlHook.jobs}
+          etlActiveProgress={etlHook.activeProgress}
+          onCreateEtlJob={handleCreateEtlJob}
+          onRunEtlJob={handleRunEtlJob}
+          onCancelEtlJob={etlHook.cancelJob}
+          onDeleteEtlJob={etlHook.deleteJob}
+          onViewEtlProgress={handleViewEtlProgress}
         />
       </div>
       <div
@@ -781,6 +845,24 @@ export function AppLayout() {
           propertyGraphs={propertyGraphs}
         />
       )}
+
+      <EtlJobModal
+        open={showEtlModal}
+        onClose={() => setShowEtlModal(false)}
+        connectors={connectorsHook.connectors}
+        onAddConnector={connectorsHook.addConnector}
+        onSubmit={handleEtlSubmit}
+      />
+
+      <EtlProgress
+        open={showEtlProgress}
+        onClose={() => setShowEtlProgress(false)}
+        job={activeEtlJob}
+        connectors={connectorsHook.connectors}
+        activeProgress={etlHook.activeProgress}
+        lastComplete={etlHook.lastComplete}
+        onCancel={etlHook.cancelJob}
+      />
     </div>
   );
 }

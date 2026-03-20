@@ -46,7 +46,7 @@ fn sanitize_alias(name: &str) -> String {
     }
 }
 
-fn escape_sql_string(s: &str) -> String {
+pub(crate) fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -54,10 +54,20 @@ fn is_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")
 }
 
-fn ensure_extension(conn: &Connection, ext: &str) -> Result<(), AppError> {
+pub(crate) fn ensure_extension(conn: &Connection, ext: &str) -> Result<(), AppError> {
     conn.execute_batch(&format!("INSTALL '{}'; LOAD '{}';", ext, ext))
         .map_err(|e| {
             AppError::ConnectorError(format!("Failed to load {} extension: {}", ext, e))
+        })
+}
+
+fn ensure_community_extension(conn: &Connection, ext: &str) -> Result<(), AppError> {
+    conn.execute_batch(&format!("INSTALL {} FROM community; LOAD {};", ext, ext))
+        .map_err(|e| {
+            AppError::ConnectorError(format!(
+                "Failed to load {} community extension: {}",
+                ext, e
+            ))
         })
 }
 
@@ -525,7 +535,7 @@ impl ConnectorOps for PostgresOps {
             .ok_or_else(|| {
                 AppError::ConnectorError("PostgreSQL connector missing alias".into())
             })?;
-        introspect_attached_db(conn, alias)
+        introspect_attached_postgres(conn, alias)
     }
 
     fn test(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
@@ -535,32 +545,111 @@ impl ConnectorOps for PostgresOps {
     }
 }
 
-// ──────────────────────────── SnowflakeOps (stub) ────────────────────────────
+// ──────────────────────────── SnowflakeOps ────────────────────────────
 
 pub struct SnowflakeOps;
 
+fn snowflake_secret_name(connector: &Connector) -> String {
+    connector
+        .secret_name
+        .clone()
+        .unwrap_or_else(|| format!("cdv_sf_{}", connector.alias.as_deref().unwrap_or("sf")))
+}
+
+fn extract_snowflake_account(host: &str) -> &str {
+    host.strip_suffix(".snowflakecomputing.com")
+        .unwrap_or(host)
+}
+
 impl ConnectorOps for SnowflakeOps {
-    fn activate(&self, _conn: &Connection, _connector: &Connector) -> Result<(), AppError> {
-        Err(AppError::ConnectorError(
-            "Snowflake support coming soon".into(),
-        ))
-    }
-    fn deactivate(&self, _conn: &Connection, _connector: &Connector) -> Result<(), AppError> {
+    fn activate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        ensure_community_extension(conn, "snowflake")?;
+
+        let cfg = &connector.config;
+        let raw_host = cfg
+            .host
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Snowflake connector missing account".into()))?;
+        let account = extract_snowflake_account(raw_host);
+        let database = cfg
+            .database
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::ConnectorError("Snowflake connector missing database".into())
+            })?;
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Snowflake connector missing alias".into()))?;
+
+        let secret_name = snowflake_secret_name(connector);
+
+        let mut secret_parts = vec![
+            "TYPE snowflake".to_string(),
+            format!("ACCOUNT '{}'", escape_sql_string(account)),
+            format!("DATABASE '{}'", escape_sql_string(database)),
+        ];
+        if let Some(user) = cfg.user.as_deref().filter(|s| !s.is_empty()) {
+            secret_parts.push(format!("USER '{}'", escape_sql_string(user)));
+        }
+        if let Some(password) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
+            secret_parts.push(format!("PASSWORD '{}'", escape_sql_string(password)));
+        }
+        if let Some(wh) = cfg.warehouse.as_deref().filter(|s| !s.is_empty()) {
+            secret_parts.push(format!("WAREHOUSE '{}'", escape_sql_string(wh)));
+        }
+
+        let secret_sql = format!(
+            "CREATE SECRET \"{}\" ({})",
+            secret_name,
+            secret_parts.join(", ")
+        );
+        conn.execute_batch(&secret_sql).map_err(|e| {
+            AppError::ConnectorError(format!("Failed to create Snowflake secret: {}", e))
+        })?;
+
+        let attach_sql = format!(
+            "ATTACH '' AS \"{}\" (TYPE snowflake, SECRET \"{}\", READ_ONLY)",
+            alias, secret_name
+        );
+        conn.execute_batch(&attach_sql).map_err(|e| {
+            AppError::ConnectorError(format!("Failed to attach Snowflake database: {}", e))
+        })?;
+
         Ok(())
     }
+
+    fn deactivate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        if let Some(alias) = &connector.alias {
+            conn.execute_batch(&format!("DETACH \"{}\"", alias))
+                .map_err(|e| {
+                    AppError::ConnectorError(format!("Failed to detach Snowflake: {}", e))
+                })?;
+        }
+        let secret_name = snowflake_secret_name(connector);
+        conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", secret_name))
+            .map_err(|e| AppError::ConnectorError(e.to_string()))?;
+        Ok(())
+    }
+
     fn introspect(
         &self,
-        _conn: &Connection,
-        _connector: &Connector,
+        conn: &Connection,
+        connector: &Connector,
     ) -> Result<Vec<CatalogEntry>, AppError> {
-        Err(AppError::ConnectorError(
-            "Snowflake support coming soon".into(),
-        ))
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::ConnectorError("Snowflake connector missing alias".into())
+            })?;
+        introspect_attached_db(conn, alias)
     }
-    fn test(&self, _conn: &Connection, _connector: &Connector) -> Result<(), AppError> {
-        Err(AppError::ConnectorError(
-            "Snowflake support coming soon".into(),
-        ))
+
+    fn test(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        self.activate(conn, connector)?;
+        self.deactivate(conn, connector).ok();
+        Ok(())
     }
 }
 
@@ -734,6 +823,156 @@ fn introspect_attached_duckdb(
     Ok(entries)
 }
 
+/// Postgres-specific introspection that fetches all metadata in bulk:
+/// - Table list from information_schema.tables (1 query)
+/// - All column info from information_schema.columns (1 query)
+/// - Approximate row counts from pg_catalog.pg_class (1 query)
+/// Total: 3 network round trips regardless of table count.
+fn introspect_attached_postgres(
+    conn: &Connection,
+    alias: &str,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    let tables_sql = format!(
+        "SELECT table_schema, table_name, table_type \
+         FROM information_schema.tables \
+         WHERE table_catalog = '{}'",
+        escape_sql_string(alias)
+    );
+    let mut stmt = conn.prepare(&tables_sql)?;
+
+    struct TableInfo {
+        schema: String,
+        name: String,
+        table_type: String,
+    }
+
+    let tables: Vec<TableInfo> = stmt
+        .query_map(params![], |row| {
+            Ok(TableInfo {
+                schema: row.get(0)?,
+                name: row.get(1)?,
+                table_type: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Bulk-fetch all column metadata in one query instead of N DESCRIBE calls
+    let columns_sql = format!(
+        "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_catalog = '{}' \
+         ORDER BY table_schema, table_name, ordinal_position",
+        escape_sql_string(alias)
+    );
+
+    let mut columns_map: std::collections::HashMap<(String, String), Vec<ColumnInfo>> =
+        std::collections::HashMap::new();
+    if let Ok(mut col_stmt) = conn.prepare(&columns_sql) {
+        if let Ok(rows) = col_stmt.query_map(params![], |row| {
+            let schema: String = row.get(0)?;
+            let table: String = row.get(1)?;
+            let col_name: String = row.get(2)?;
+            let data_type: String = row.get(3)?;
+            let nullable_str: String = row.get(4)?;
+            Ok((schema, table, col_name, data_type, nullable_str))
+        }) {
+            for r in rows.flatten() {
+                let key = (r.0, r.1);
+                columns_map.entry(key).or_default().push(ColumnInfo {
+                    name: r.2,
+                    data_type: r.3,
+                    nullable: r.4 == "YES",
+                    key: None,
+                });
+            }
+        }
+    }
+
+    // Bulk-fetch primary key info from pg_catalog
+    let pk_sql = format!(
+        "SELECT kcu.table_schema, kcu.table_name, kcu.column_name \
+         FROM \"{alias}\".information_schema.table_constraints tc \
+         JOIN \"{alias}\".information_schema.key_column_usage kcu \
+           ON tc.constraint_name = kcu.constraint_name \
+           AND tc.table_schema = kcu.table_schema \
+         WHERE tc.constraint_type = 'PRIMARY KEY'"
+    );
+
+    let mut pk_set: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    if let Ok(mut pk_stmt) = conn.prepare(&pk_sql) {
+        if let Ok(rows) = pk_stmt.query_map(params![], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            for r in rows.flatten() {
+                pk_set.insert(r);
+            }
+        }
+    }
+
+    // Apply PK info to columns
+    for ((schema, table), cols) in &mut columns_map {
+        for col in cols.iter_mut() {
+            if pk_set.contains(&(schema.clone(), table.clone(), col.name.clone())) {
+                col.key = Some("PRI".to_string());
+            }
+        }
+    }
+
+    // Bulk-fetch approximate row counts from pg_catalog
+    let counts_sql = format!(
+        "SELECT n.nspname, c.relname, c.reltuples::BIGINT \
+         FROM \"{alias}\".pg_catalog.pg_class c \
+         JOIN \"{alias}\".pg_catalog.pg_namespace n \
+           ON c.relnamespace = n.oid \
+         WHERE c.relkind IN ('r', 'v', 'm', 'p')"
+    );
+
+    let mut approx_counts: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
+    if let Ok(mut count_stmt) = conn.prepare(&counts_sql) {
+        if let Ok(rows) = count_stmt.query_map(params![], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            for r in rows.flatten() {
+                approx_counts.insert((r.0, r.1), r.2);
+            }
+        }
+    }
+
+    let mut entries = Vec::with_capacity(tables.len());
+    for t in &tables {
+        let key = (t.schema.clone(), t.name.clone());
+        let columns = columns_map.remove(&key).unwrap_or_default();
+        let row_count = approx_counts
+            .get(&key)
+            .and_then(|&c| if c < 0 { None } else { Some(c as u64) });
+        let entry_type = if t.table_type.contains("VIEW") {
+            "view"
+        } else {
+            "table"
+        };
+        entries.push(CatalogEntry {
+            schema: Some(t.schema.clone()),
+            name: t.name.clone(),
+            entry_type: entry_type.to_string(),
+            columns,
+            row_count,
+        });
+    }
+
+    Ok(entries)
+}
+
 fn introspect_attached_db(
     conn: &Connection,
     alias: &str,
@@ -816,7 +1055,9 @@ pub fn add_connector(
         connector_type,
         ConnectorType::S3 | ConnectorType::GCS | ConnectorType::R2
     );
-    let secret_name = if is_cloud {
+    let needs_secret =
+        is_cloud || matches!(connector_type, ConnectorType::Snowflake);
+    let secret_name = if needs_secret {
         Some(format!("cdv_{}", id.replace('-', "_")))
     } else {
         None
@@ -882,6 +1123,7 @@ pub fn remove_connector(id: String, state: State<'_, AppState>) -> Result<(), Ap
         sources.retain(|_, ds| ds.connector_id != id);
     }
 
+    state.connector_catalogs.lock().remove(&id);
     catalog::save_state_catalog(&state);
 
     Ok(())
@@ -930,7 +1172,9 @@ pub fn test_connector(
         None
     };
 
-    let secret_name = if is_cloud {
+    let needs_secret =
+        is_cloud || matches!(connector_type, ConnectorType::Snowflake);
+    let secret_name = if needs_secret {
         Some("__cdv_test_secret__".to_string())
     } else {
         None
@@ -946,7 +1190,7 @@ pub fn test_connector(
     };
 
     let ops = get_ops(&temp.connector_type);
-    let conn = state.conn.lock();
+    let conn = state.meta_conn.lock();
     let result = ops.test(&conn, &temp);
     ops.deactivate(&conn, &temp).ok();
     result
@@ -966,8 +1210,63 @@ pub fn introspect_connector(
     };
 
     let ops = get_ops(&connector.connector_type);
-    let conn = state.conn.lock();
-    ops.introspect(&conn, &connector)
+    let conn = state.meta_conn.lock();
+    let entries = ops.introspect(&conn, &connector)?;
+    drop(conn);
+
+    state
+        .connector_catalogs
+        .lock()
+        .insert(id, entries.clone());
+    catalog::save_state_catalog(&state);
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn list_pg_databases(
+    config: ConnectorConfig,
+    secret_key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    let conn = state.meta_conn.lock();
+    ensure_extension(&conn, "postgres")?;
+
+    let mut cfg = config;
+    cfg.database = Some("postgres".to_string());
+    if let Some(sk) = secret_key {
+        cfg.password = Some(sk);
+    }
+    let connstr = build_pg_connstr(&cfg)?;
+    let alias = "__cdv_list_dbs__";
+
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS \"{}\" (TYPE POSTGRES, READ_ONLY)",
+        escape_sql_string(&connstr),
+        alias
+    ))
+    .map_err(|e| AppError::ConnectorError(format!("Failed to connect to PostgreSQL: {}", e)))?;
+
+    let sql = format!(
+        "SELECT datname FROM \"{}\".pg_catalog.pg_database \
+         WHERE datistemplate = false ORDER BY datname",
+        alias
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let dbs: Vec<String> = stmt
+        .query_map(params![], |row| row.get(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    conn.execute_batch(&format!("DETACH \"{}\"", alias)).ok();
+    Ok(dbs)
+}
+
+#[tauri::command]
+pub fn get_cached_catalogs(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, Vec<CatalogEntry>>, AppError> {
+    Ok(state.connector_catalogs.lock().clone())
 }
 
 #[tauri::command]

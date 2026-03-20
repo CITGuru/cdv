@@ -3,6 +3,7 @@ mod cloud_connector;
 mod connector;
 mod dataset_manager;
 mod error;
+mod etl;
 mod export_service;
 mod graph;
 mod query_engine;
@@ -68,6 +69,10 @@ pub fn run() {
             for ds in cat.data_sources {
                 state.data_sources.lock().insert(ds.id.clone(), ds);
             }
+            *state.connector_catalogs.lock() = cat.connector_catalogs;
+            for job in cat.etl_jobs {
+                state.etl_jobs.lock().insert(job.id.clone(), job);
+            }
 
             app.manage(state);
             Ok(())
@@ -93,7 +98,9 @@ pub fn run() {
             connector::remove_connector,
             connector::test_connector,
             connector::introspect_connector,
+            connector::get_cached_catalogs,
             connector::list_connectors,
+            connector::list_pg_databases,
             export_service::export_data,
             settings::get_settings,
             settings::set_settings,
@@ -106,6 +113,13 @@ pub fn run() {
             graph::drop_property_graph,
             graph::get_property_graph_info,
             graph::run_graph_algorithm,
+            etl::create_etl_job,
+            etl::list_etl_jobs,
+            etl::get_etl_job,
+            etl::delete_etl_job,
+            etl::run_etl_job,
+            etl::cancel_etl_job,
+            etl::preview_etl_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

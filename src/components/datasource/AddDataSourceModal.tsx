@@ -67,6 +67,7 @@ import {
   listConnectionFiles,
   introspectConnector,
   downloadUrl,
+  listPgDatabases,
 } from "@/lib/ipc";
 
 // ──── Form types ────
@@ -289,6 +290,9 @@ export function AddDataSourceModal({
   const [testing, setTesting] = useState(false);
   const [testSuccess, setTestSuccess] = useState(false);
   const [testResultText, setTestResultText] = useState<string | null>(null);
+  const [availablePgDbs, setAvailablePgDbs] = useState<string[]>([]);
+  const [listingPgDbs, setListingPgDbs] = useState(false);
+  const [pgDbDropdownOpen, setPgDbDropdownOpen] = useState(false);
 
   const cloudConnectors = connectors.filter((c) =>
     ["s3", "gcs", "r2"].includes(c.connector_type)
@@ -646,6 +650,25 @@ export function AddDataSourceModal({
     return db.authMode === "user_password" ? (db.auth.password || undefined) : undefined;
   };
 
+  const handleListPgDatabases = async () => {
+    setListingPgDbs(true);
+    setPgDbDropdownOpen(true);
+    setError(null);
+    try {
+      const dbs = await listPgDatabases({
+        config: getDbConfig(),
+        secretKey: getDbSecretKey(),
+      });
+      setAvailablePgDbs(dbs);
+    } catch (e) {
+      setError(extractError(e));
+      setAvailablePgDbs([]);
+      setPgDbDropdownOpen(false);
+    } finally {
+      setListingPgDbs(false);
+    }
+  };
+
   const handleTestPostgres = async () => {
     setTesting(true);
     setError(null);
@@ -716,7 +739,6 @@ export function AddDataSourceModal({
           connectorType: "snowflake",
           config: {
             host: db.host,
-            port: parseInt(db.port) || 443,
             database: db.database,
             user: db.authMode === "user_password" ? (db.auth.user || undefined) : undefined,
             warehouse: db.warehouse || undefined,
@@ -725,7 +747,7 @@ export function AddDataSourceModal({
         });
         setTestSuccess(true);
         setTestResultText(
-          ["DBMS: Snowflake", "Driver: Snowflake DuckDB Driver", `URL: duckdb:snowflake://${db.host}:${db.port}`, "Connection: Succeeded"].join("\n")
+          ["DBMS: Snowflake", "Driver: Snowflake ADBC (Community Extension)", `Account: ${db.host}`, `Database: ${db.database}`, "Connection: Succeeded"].join("\n")
         );
         setTimeout(() => { setTestSuccess(false); setTestResultText(null); }, 8000);
       }
@@ -754,7 +776,6 @@ export function AddDataSourceModal({
           connectorType: "snowflake",
           config: {
             host: db.host,
-            port: parseInt(db.port) || 443,
             database: db.database,
             user: db.authMode === "user_password" ? (db.auth.user || undefined) : undefined,
             warehouse: db.warehouse || undefined,
@@ -986,6 +1007,11 @@ export function AddDataSourceModal({
             testResultText={testResultText}
             onCopyTestResult={handleCopyTestResult}
             availableDrivers={availableDrivers}
+            availablePgDbs={availablePgDbs}
+            listingPgDbs={listingPgDbs}
+            pgDbDropdownOpen={pgDbDropdownOpen}
+            onPgDbDropdownChange={setPgDbDropdownOpen}
+            onListPgDatabases={handleListPgDatabases}
           />
         ) : step === "select-tables" ? (
           <div className="flex-1 min-h-0 overflow-y-auto px-5 py-3">
@@ -1195,6 +1221,11 @@ function SourceStep({
   testResultText,
   onCopyTestResult,
   availableDrivers,
+  availablePgDbs,
+  listingPgDbs,
+  pgDbDropdownOpen,
+  onPgDbDropdownChange,
+  onListPgDatabases,
 }: {
   form: UseFormReturn<DataSourceFormValues>;
   onSourceTypeChange: (t: SourceKind) => void;
@@ -1211,6 +1242,11 @@ function SourceStep({
   testResultText: string | null;
   onCopyTestResult: () => void;
   availableDrivers: Driver[];
+  availablePgDbs: string[];
+  listingPgDbs: boolean;
+  pgDbDropdownOpen: boolean;
+  onPgDbDropdownChange: (open: boolean) => void;
+  onListPgDatabases: () => void;
 }) {
   const sourceType = form.watch("sourceType");
   const driver = form.watch("driver");
@@ -1426,7 +1462,61 @@ function SourceStep({
               </>
             )}
             <FormRow label="Database:">
-              <Input {...form.register("db.database")} placeholder="postgres" className="font-mono" />
+              <div className="relative">
+                <div className="flex gap-1.5">
+                  <Input {...form.register("db.database")} placeholder="postgres" className="font-mono flex-1" />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1 px-2.5"
+                    disabled={!form.watch("db.host")}
+                    onClick={() => {
+                      if (pgDbDropdownOpen) {
+                        onPgDbDropdownChange(false);
+                      } else {
+                        onListPgDatabases();
+                      }
+                    }}
+                  >
+                    {listingPgDbs ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Database className="size-3.5" />
+                    )}
+                    <ChevronDown className="size-3" />
+                  </Button>
+                </div>
+                {pgDbDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 z-50 min-w-40 max-h-60 overflow-y-auto rounded-lg border border-border bg-popover shadow-md">
+                    {listingPgDbs ? (
+                      <div className="flex items-center justify-center gap-2 px-3 py-4">
+                        <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Loading databases…</span>
+                      </div>
+                    ) : availablePgDbs.length === 0 ? (
+                      <div className="px-3 py-4 text-xs text-muted-foreground text-center">
+                        No databases found
+                      </div>
+                    ) : (
+                      availablePgDbs.map((db) => (
+                        <button
+                          key={db}
+                          type="button"
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs font-mono text-popover-foreground hover:bg-accent hover:text-accent-foreground text-left"
+                          onClick={() => {
+                            form.setValue("db.database", db, { shouldDirty: true });
+                            onPgDbDropdownChange(false);
+                          }}
+                        >
+                          <Database className="size-3.5 text-muted-foreground shrink-0" />
+                          {db}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
             </FormRow>
             <FormRow label="URL:">
               <div>
@@ -1451,15 +1541,12 @@ function SourceStep({
         {/* ───── Snowflake ───── */}
         {isSnowflake && (
           <>
-            <div className="flex gap-3">
-              <FormRow label="Host:" className="flex-1">
-                <Input {...form.register("db.host")} placeholder="" className="font-mono" />
-              </FormRow>
-              <div className="w-24 shrink-0 space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Port:</Label>
-                <Input value={form.watch("db.port")} readOnly className="font-mono bg-muted" />
+            <FormRow label="Account:">
+              <div>
+                <Input {...form.register("db.host")} placeholder="xy12345.us-east-1" className="font-mono" />
+                <p className="text-[10px] text-muted-foreground mt-0.5">Snowflake account identifier (e.g. orgname-account_name)</p>
               </div>
-            </div>
+            </FormRow>
             <FormRow label="Authentication:">
               <Select value={dbAuthMode} onValueChange={(v) => form.setValue("db.authMode", v as AuthMode)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1480,16 +1567,16 @@ function SourceStep({
               </>
             )}
             <FormRow label="Database:">
-              <Input {...form.register("db.database")} placeholder="" className="font-mono" />
+              <Input {...form.register("db.database")} placeholder="MY_DATABASE" className="font-mono" />
             </FormRow>
             <FormRow label="Warehouse:">
-              <Input {...form.register("db.warehouse")} placeholder="" className="font-mono" />
-            </FormRow>
-            <FormRow label="URL:">
               <div>
-                <Input readOnly value={`duckdb:snowflake://${form.watch("db.host")}:${form.watch("db.port")}`} className="font-mono text-xs bg-muted" />
-                <p className="text-[10px] text-muted-foreground mt-0.5">Overrides settings above</p>
+                <Input {...form.register("db.warehouse")} placeholder="COMPUTE_WH" className="font-mono" />
+                <p className="text-[10px] text-muted-foreground mt-0.5">Optional — uses the user's default warehouse if empty</p>
               </div>
+            </FormRow>
+            <FormRow label="Connection:">
+              <Input readOnly value={`snowflake://${form.watch("db.host") || "account"}/${form.watch("db.database") || "database"}`} className="font-mono text-xs bg-muted" />
             </FormRow>
             {testSuccess && testResultText && (
               <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3 space-y-2">

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use duckdb::Connection;
 use parking_lot::Mutex;
@@ -192,15 +194,116 @@ pub struct FilePreview {
     pub preview_data: Vec<u8>,
 }
 
+// ──────────────────────────── ETL types ────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SyncStrategy {
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "incremental")]
+    Incremental,
+    #[serde(rename = "append")]
+    Append,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum JobStatus {
+    #[serde(rename = "idle")]
+    Idle,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "partial")]
+    Partial,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum TableStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "skipped")]
+    Skipped,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TableSyncState {
+    pub schema_name: String,
+    pub table_name: String,
+    pub status: TableStatus,
+    #[serde(default)]
+    pub rows_synced: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub replication_key: Option<String>,
+    #[serde(default)]
+    pub replication_value: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EtlJob {
+    pub id: String,
+    pub name: String,
+    pub source_connector_id: String,
+    pub target_connector_id: String,
+    pub strategy: SyncStrategy,
+    #[serde(default)]
+    pub include_schemas: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_tables: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    pub skip_views: bool,
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    pub status: JobStatus,
+    #[serde(default)]
+    pub table_states: Vec<TableSyncState>,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_run_at: Option<String>,
+    #[serde(default)]
+    pub last_completed_at: Option<String>,
+    #[serde(default)]
+    pub total_rows_synced: u64,
+    #[serde(default)]
+    pub run_count: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 pub struct AppState {
+    /// Primary connection for user queries, DDL, and data operations.
     pub conn: Mutex<Connection>,
+    /// Secondary connection for metadata operations (introspection, test)
+    /// so they don't block the primary query path.
+    pub meta_conn: Mutex<Connection>,
     pub data_sources: Mutex<HashMap<String, DataSource>>,
     pub connectors: Mutex<HashMap<String, Connector>>,
+    pub connector_catalogs: Mutex<HashMap<String, Vec<CatalogEntry>>>,
     pub catalog_path: PathBuf,
     pub settings_path: PathBuf,
     #[allow(clippy::type_complexity)]
     pub settings_cache: Mutex<Option<crate::settings::Settings>>,
     pub graph_enabled: Mutex<bool>,
+    pub etl_jobs: Mutex<HashMap<String, EtlJob>>,
+    pub etl_cancel_flag: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -214,14 +317,21 @@ impl AppState {
         if !graph_ok {
             eprintln!("DuckPGQ extension unavailable (in-memory mode)");
         }
+        let meta_conn = conn
+            .try_clone()
+            .expect("Failed to clone DuckDB connection for metadata");
         AppState {
             conn: Mutex::new(conn),
+            meta_conn: Mutex::new(meta_conn),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
+            connector_catalogs: Mutex::new(HashMap::new()),
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
             graph_enabled: Mutex::new(graph_ok),
+            etl_jobs: Mutex::new(HashMap::new()),
+            etl_cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -240,14 +350,19 @@ impl AppState {
         if !graph_ok {
             eprintln!("DuckPGQ extension unavailable");
         }
+        let meta_conn = conn.try_clone()?;
         Ok(AppState {
             conn: Mutex::new(conn),
+            meta_conn: Mutex::new(meta_conn),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
+            connector_catalogs: Mutex::new(HashMap::new()),
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),
             graph_enabled: Mutex::new(graph_ok),
+            etl_jobs: Mutex::new(HashMap::new()),
+            etl_cancel_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 }

@@ -167,7 +167,7 @@ pub fn preview_file(
         None => detect_format(&path)?,
     };
 
-    let conn = state.conn.lock();
+    let conn = state.meta_conn.lock();
     let schema = describe_ref(&conn, &duckdb_ref)?;
     let row_count = count_ref(&conn, &duckdb_ref);
 
@@ -237,8 +237,39 @@ pub fn create_data_source(
             "\"{}\".\"{}\".\"{}\"",
             alias, schema_name, table_name
         );
-        let columns = describe_ref(&conn, &qualified_name).unwrap_or_default();
-        let row_count = count_ref(&conn, &qualified_name);
+
+        let cached_entry = state
+            .connector_catalogs
+            .lock()
+            .get(&connector_id)
+            .and_then(|entries| {
+                entries.iter().find(|e| {
+                    e.name == table_name && e.schema.as_deref() == Some(schema_name)
+                }).cloned()
+            });
+
+        let (columns, row_count) = if let Some(entry) = cached_entry {
+            (entry.columns, entry.row_count)
+        } else if matches!(connector.connector_type, ConnectorType::PostgreSQL) {
+            let columns = describe_ref(&conn, &qualified_name).unwrap_or_default();
+            let approx_sql = format!(
+                "SELECT c.reltuples::BIGINT \
+                 FROM \"{alias}\".pg_catalog.pg_class c \
+                 JOIN \"{alias}\".pg_catalog.pg_namespace n ON c.relnamespace = n.oid \
+                 WHERE n.nspname = '{}' AND c.relname = '{}'",
+                schema_name.replace('\'', "''"),
+                table_name.replace('\'', "''")
+            );
+            let row_count = conn
+                .query_row(&approx_sql, params![], |row| row.get::<_, i64>(0))
+                .ok()
+                .and_then(|c| if c < 0 { None } else { Some(c as u64) });
+            (columns, row_count)
+        } else {
+            let columns = describe_ref(&conn, &qualified_name).unwrap_or_default();
+            let row_count = count_ref(&conn, &qualified_name);
+            (columns, row_count)
+        };
 
         let resolved_driver = driver.unwrap_or_else(|| connector.connector_type.default_driver());
         let id = uuid::Uuid::new_v4().to_string();

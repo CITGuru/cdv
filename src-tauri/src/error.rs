@@ -8,6 +8,7 @@ pub enum AppError {
     ExportError(String),
     ConnectorError(String),
     GraphError(String),
+    EtlError(String),
 }
 
 impl AppError {
@@ -19,6 +20,7 @@ impl AppError {
             AppError::ExportError(msg) => msg,
             AppError::ConnectorError(msg) => msg,
             AppError::GraphError(msg) => msg,
+            AppError::EtlError(msg) => msg,
         }
     }
 
@@ -30,6 +32,7 @@ impl AppError {
             AppError::ExportError(_) => "EXPORT_ERROR",
             AppError::ConnectorError(_) => "CONNECTOR_ERROR",
             AppError::GraphError(_) => "GRAPH_ERROR",
+            AppError::EtlError(_) => "ETL_ERROR",
         }
     }
 }
