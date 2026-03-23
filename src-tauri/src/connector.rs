@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use duckdb::params;
 use duckdb::Connection;
@@ -545,6 +546,166 @@ impl ConnectorOps for PostgresOps {
     }
 }
 
+// ──────────────────────────── Snowflake ADBC driver auto-install ────────────────────────────
+
+const ADBC_RELEASE_TAG: &str = "apache-arrow-adbc-20";
+const ADBC_DRIVER_VERSION: &str = "1.8.0";
+
+fn detect_adbc_platform() -> Result<(&'static str, &'static str), AppError> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    match (os, arch) {
+        ("linux", "x86_64") => Ok((
+            "linux_amd64",
+            "adbc_driver_snowflake-1.8.0-py3-none-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl",
+        )),
+        ("linux", "aarch64") => Ok((
+            "linux_arm64",
+            "adbc_driver_snowflake-1.8.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+        )),
+        ("macos", "x86_64") => Ok((
+            "osx_amd64",
+            "adbc_driver_snowflake-1.8.0-py3-none-macosx_10_15_x86_64.whl",
+        )),
+        ("macos", "aarch64") => Ok((
+            "osx_arm64",
+            "adbc_driver_snowflake-1.8.0-py3-none-macosx_11_0_arm64.whl",
+        )),
+        ("windows", "x86_64") => Ok((
+            "windows_amd64",
+            "adbc_driver_snowflake-1.8.0-py3-none-win_amd64.whl",
+        )),
+        _ => Err(AppError::ConnectorError(format!(
+            "Unsupported platform for Snowflake ADBC driver: {} {}",
+            os, arch
+        ))),
+    }
+}
+
+fn get_duckdb_version(conn: &Connection) -> Result<String, AppError> {
+    let version: String = conn
+        .query_row(
+            "SELECT library_version FROM pragma_version()",
+            params![],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::ConnectorError(format!("Failed to get DuckDB version: {}", e)))?;
+    if version.starts_with('v') {
+        Ok(version)
+    } else {
+        Ok(format!("v{}", version))
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Checks whether the Snowflake ADBC driver library is present in the DuckDB
+/// extensions directory. If missing, downloads the appropriate wheel from the
+/// Apache Arrow ADBC GitHub release and extracts the shared library.
+fn ensure_adbc_snowflake_driver(conn: &Connection) -> Result<(), AppError> {
+    let (platform, wheel_name) = detect_adbc_platform()?;
+    let version = get_duckdb_version(conn)?;
+
+    let home = home_dir()
+        .ok_or_else(|| AppError::ConnectorError("Cannot determine home directory".into()))?;
+    let ext_dir = home
+        .join(".duckdb")
+        .join("extensions")
+        .join(&version)
+        .join(platform);
+
+    let lib_filename = if cfg!(windows) {
+        "adbc_driver_snowflake.dll"
+    } else {
+        "libadbc_driver_snowflake.so"
+    };
+    let driver_path = ext_dir.join(lib_filename);
+
+    if driver_path.exists() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "Snowflake ADBC driver not found at {}; downloading v{}…",
+        driver_path.display(),
+        ADBC_DRIVER_VERSION
+    );
+
+    std::fs::create_dir_all(&ext_dir).map_err(|e| {
+        AppError::ConnectorError(format!("Failed to create extensions directory: {}", e))
+    })?;
+
+    let url = format!(
+        "https://github.com/apache/arrow-adbc/releases/download/{}/{}",
+        ADBC_RELEASE_TAG, wheel_name
+    );
+
+    let response = ureq::get(&url).call().map_err(|e| {
+        AppError::ConnectorError(format!(
+            "Failed to download Snowflake ADBC driver from {}: {}",
+            url, e
+        ))
+    })?;
+
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(200_000_000) // 200 MB safety limit
+        .read_to_end(&mut body)
+        .map_err(|e| {
+            AppError::ConnectorError(format!("Failed to read ADBC driver download: {}", e))
+        })?;
+
+    let cursor = std::io::Cursor::new(&body);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
+        AppError::ConnectorError(format!("Failed to open ADBC driver archive: {}", e))
+    })?;
+
+    let inner_path = if cfg!(windows) {
+        "adbc_driver_snowflake/adbc_driver_snowflake.dll"
+    } else {
+        "adbc_driver_snowflake/libadbc_driver_snowflake.so"
+    };
+
+    let mut entry = archive.by_name(inner_path).map_err(|e| {
+        AppError::ConnectorError(format!(
+            "ADBC driver library not found in downloaded archive: {}",
+            e
+        ))
+    })?;
+
+    let mut lib_bytes = Vec::new();
+    entry.read_to_end(&mut lib_bytes).map_err(|e| {
+        AppError::ConnectorError(format!("Failed to extract ADBC driver from archive: {}", e))
+    })?;
+    drop(entry);
+
+    std::fs::write(&driver_path, &lib_bytes).map_err(|e| {
+        AppError::ConnectorError(format!("Failed to write ADBC driver to disk: {}", e))
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&driver_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| {
+                AppError::ConnectorError(format!("Failed to set ADBC driver permissions: {}", e))
+            })?;
+    }
+
+    eprintln!(
+        "Snowflake ADBC driver v{} installed to {}",
+        ADBC_DRIVER_VERSION,
+        driver_path.display()
+    );
+
+    Ok(())
+}
+
 // ──────────────────────────── SnowflakeOps ────────────────────────────
 
 pub struct SnowflakeOps;
@@ -563,6 +724,7 @@ fn extract_snowflake_account(host: &str) -> &str {
 
 impl ConnectorOps for SnowflakeOps {
     fn activate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        ensure_adbc_snowflake_driver(conn)?;
         ensure_community_extension(conn, "snowflake")?;
 
         let cfg = &connector.config;
@@ -643,7 +805,7 @@ impl ConnectorOps for SnowflakeOps {
             .ok_or_else(|| {
                 AppError::ConnectorError("Snowflake connector missing alias".into())
             })?;
-        introspect_attached_db(conn, alias)
+        introspect_attached_snowflake(conn, alias)
     }
 
     fn test(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
@@ -967,6 +1129,89 @@ fn introspect_attached_postgres(
             entry_type: entry_type.to_string(),
             columns,
             row_count,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Snowflake-optimised introspection: fetches all table and column metadata in
+/// just 2 bulk queries over the network instead of per-table DESCRIBE + COUNT.
+fn introspect_attached_snowflake(
+    conn: &Connection,
+    alias: &str,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    let tables_sql = format!(
+        "SELECT table_schema, table_name, table_type \
+         FROM information_schema.tables \
+         WHERE table_catalog = '{}'",
+        escape_sql_string(alias)
+    );
+    let mut stmt = conn.prepare(&tables_sql)?;
+
+    struct TableInfo {
+        schema: String,
+        name: String,
+        table_type: String,
+    }
+
+    let tables: Vec<TableInfo> = stmt
+        .query_map(params![], |row| {
+            Ok(TableInfo {
+                schema: row.get(0)?,
+                name: row.get(1)?,
+                table_type: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let columns_sql = format!(
+        "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_catalog = '{}' \
+         ORDER BY table_schema, table_name, ordinal_position",
+        escape_sql_string(alias)
+    );
+
+    let mut columns_map: std::collections::HashMap<(String, String), Vec<ColumnInfo>> =
+        std::collections::HashMap::new();
+    if let Ok(mut col_stmt) = conn.prepare(&columns_sql) {
+        if let Ok(rows) = col_stmt.query_map(params![], |row| {
+            let schema: String = row.get(0)?;
+            let table: String = row.get(1)?;
+            let col_name: String = row.get(2)?;
+            let data_type: String = row.get(3)?;
+            let nullable_str: String = row.get(4)?;
+            Ok((schema, table, col_name, data_type, nullable_str))
+        }) {
+            for r in rows.flatten() {
+                let key = (r.0, r.1);
+                columns_map.entry(key).or_default().push(ColumnInfo {
+                    name: r.2,
+                    data_type: r.3,
+                    nullable: r.4 == "YES",
+                    key: None,
+                });
+            }
+        }
+    }
+
+    let mut entries = Vec::with_capacity(tables.len());
+    for t in &tables {
+        let key = (t.schema.clone(), t.name.clone());
+        let columns = columns_map.remove(&key).unwrap_or_default();
+        let entry_type = if t.table_type.contains("VIEW") {
+            "view"
+        } else {
+            "table"
+        };
+        entries.push(CatalogEntry {
+            schema: Some(t.schema.clone()),
+            name: t.name.clone(),
+            entry_type: entry_type.to_string(),
+            columns,
+            row_count: None,
         });
     }
 
