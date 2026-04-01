@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use arrow::ipc::writer::StreamWriter;
 use duckdb::arrow::datatypes::Schema;
+use duckdb::arrow::ipc::writer::StreamWriter;
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
 use serde::Deserialize;

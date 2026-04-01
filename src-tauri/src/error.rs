@@ -62,8 +62,8 @@ impl From<duckdb::Error> for AppError {
     }
 }
 
-impl From<arrow::error::ArrowError> for AppError {
-    fn from(err: arrow::error::ArrowError) -> Self {
+impl From<duckdb::arrow::error::ArrowError> for AppError {
+    fn from(err: duckdb::arrow::error::ArrowError) -> Self {
         AppError::QueryError(format!("Arrow error: {}", err))
     }
 }
