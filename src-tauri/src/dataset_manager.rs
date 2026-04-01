@@ -6,8 +6,13 @@ use duckdb::Connection;
 use tauri::{Manager, State};
 
 use crate::catalog;
+use crate::connector::resolve_attach_alias_for_database;
 use crate::error::AppError;
-use crate::state::{AppState, ColumnInfo, ConnectorType, DataSource, Driver, FilePreview};
+use crate::state::{
+    catalog_db_key_for_connector, normalize_snowflake_database_name, AppState, ColumnInfo,
+    ConnectorType, DataSource, Driver,
+    FilePreview,
+};
 
 pub fn build_duckdb_ref(path: &str, format: &str) -> Result<String, AppError> {
     let (_, duckdb_ref) = format_to_ref(path, format)?;
@@ -199,6 +204,7 @@ pub fn create_data_source(
     primary_key_column: Option<String>,
     db_schema: Option<String>,
     db_table: Option<String>,
+    db_database: Option<String>,
     driver: Option<Driver>,
     state: State<'_, AppState>,
 ) -> Result<DataSource, AppError> {
@@ -222,10 +228,17 @@ pub fn create_data_source(
     );
 
     if is_db_connector {
-        let alias = connector
-            .alias
-            .as_deref()
-            .ok_or_else(|| AppError::ConnectorError("Database connector missing alias".into()))?;
+        let secondaries = state
+            .connector_secondary_attaches
+            .lock()
+            .get(&connector_id)
+            .cloned()
+            .unwrap_or_default();
+        let alias = resolve_attach_alias_for_database(
+            &connector,
+            db_database.as_deref().filter(|s| !s.is_empty()),
+            &secondaries,
+        )?;
         let schema_name = db_schema
             .as_deref()
             .ok_or_else(|| AppError::ConnectorError("Missing schema for database table".into()))?;
@@ -238,10 +251,24 @@ pub fn create_data_source(
             alias, schema_name, table_name
         );
 
+        let default_db_key = catalog_db_key_for_connector(&connector);
+        let lookup_db_key: String = {
+            let raw = db_database
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(default_db_key.as_str());
+            if matches!(connector.connector_type, ConnectorType::Snowflake) {
+                normalize_snowflake_database_name(raw)
+            } else {
+                raw.to_string()
+            }
+        };
+
         let cached_entry = state
-            .connector_catalogs
+            .connector_catalogs_by_db
             .lock()
             .get(&connector_id)
+            .and_then(|m| m.get(&lookup_db_key))
             .and_then(|entries| {
                 entries.iter().find(|e| {
                     e.name == table_name && e.schema.as_deref() == Some(schema_name)

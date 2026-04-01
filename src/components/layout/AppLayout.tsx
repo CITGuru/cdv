@@ -45,7 +45,12 @@ import {
   listPropertyGraphs,
   dropPropertyGraph as dropPropertyGraphIpc,
 } from "@/lib/ipc";
-import type { DataSource, Connector, PropertyGraphInfo } from "@/lib/types";
+import type {
+  DataSource,
+  Connector,
+  PropertyGraphInfo,
+  AddConnectorResult,
+} from "@/lib/types";
 import { CreateGraphModal } from "@/components/graph/CreateGraphModal";
 import { AlgorithmPanel } from "@/components/graph/AlgorithmPanel";
 import { useEtlJobs } from "@/hooks/useEtlJobs";
@@ -431,7 +436,12 @@ export function AppLayout() {
   }, []);
 
   const handleImportDbTable = useCallback(
-    async (connectorId: string, schema: string, tableName: string) => {
+    async (
+      connectorId: string,
+      database: string | undefined,
+      schema: string,
+      tableName: string
+    ) => {
       try {
         const ds = await createDataSourceIpc({
           name: tableName,
@@ -439,6 +449,7 @@ export function AppLayout() {
           connectorId,
           dbSchema: schema,
           dbTable: tableName,
+          dbDatabase: database ?? null,
         });
         dataset.addDataSource(ds);
         tabs.openDataTab(ds);
@@ -533,7 +544,9 @@ export function AppLayout() {
           dataSources={dataset.dataSources}
           connectors={connectorsHook.connectors}
           catalogs={connectorsHook.catalogs}
+          connectorBrowse={connectorsHook.connectorBrowse}
           catalogLoading={connectorsHook.catalogLoading}
+          dbListLoading={connectorsHook.dbListLoading}
           activeSourceId={dataset.activeSource?.id ?? null}
           queryHistory={queryEngine.history}
           propertyGraphs={propertyGraphs}
@@ -561,6 +574,7 @@ export function AppLayout() {
           onProperties={handleProperties}
           onOpenSettings={() => setShowSettings(true)}
           onImportDbTable={handleImportDbTable}
+          onConnectDatabase={connectorsHook.connectDatabase}
           onNewQueryFromTable={handleNewQueryFromTable}
           etlJobs={etlHook.jobs}
           etlActiveProgress={etlHook.activeProgress}
@@ -878,7 +892,7 @@ function AddFromUrlDialog({
     name: string;
     connectorType: "local_file";
     config: { path: string; format?: string };
-  }) => Promise<Connector>;
+  }) => Promise<AddConnectorResult>;
 }) {
   const [url, setUrl] = useState("");
   const [format, setFormat] = useState("csv");
@@ -914,7 +928,7 @@ function AddFromUrlDialog({
     try {
       const name = u.split("/").pop()?.split("?")[0] ?? "url_source";
       const viewName = name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase() || "url_source";
-      const conn = await onAddConnector({
+      const { connector: conn } = await onAddConnector({
         name,
         connectorType: "local_file",
         config: { path: u, format },

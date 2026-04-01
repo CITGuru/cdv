@@ -24,7 +24,15 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { DataSource, Connector, CatalogEntry, PropertyGraphInfo, EtlJob, EtlProgressEvent } from "@/lib/types";
+import type {
+  DataSource,
+  Connector,
+  CatalogEntry,
+  ConnectorBrowseCache,
+  PropertyGraphInfo,
+  EtlJob,
+  EtlProgressEvent,
+} from "@/lib/types";
 import type { QueryHistoryEntry } from "@/hooks/useQuery";
 import type { ViewMode } from "@/hooks/useWorkspaceTabs";
 import { EtlJobList } from "@/components/etl/EtlJobList";
@@ -41,7 +49,9 @@ interface SidebarProps {
   dataSources: DataSource[];
   connectors: Connector[];
   catalogs: Record<string, CatalogEntry[]>;
+  connectorBrowse?: Record<string, ConnectorBrowseCache>;
   catalogLoading?: Record<string, boolean>;
+  dbListLoading?: Record<string, boolean>;
   activeSourceId: string | null;
   queryHistory: QueryHistoryEntry[];
   propertyGraphs: PropertyGraphInfo[];
@@ -68,7 +78,13 @@ interface SidebarProps {
   onImport?: (ds: DataSource) => void;
   onProperties?: (ds: DataSource) => void;
   onOpenSettings?: () => void;
-  onImportDbTable?: (connectorId: string, schema: string, table: string) => void;
+  onImportDbTable?: (
+    connectorId: string,
+    database: string | undefined,
+    schema: string,
+    table: string
+  ) => void;
+  onConnectDatabase?: (connectorId: string, database: string) => Promise<void>;
   onNewQueryFromTable?: (qualifiedName: string) => void;
   etlJobs?: EtlJob[];
   etlActiveProgress?: EtlProgressEvent | null;
@@ -83,7 +99,9 @@ export function Sidebar({
   dataSources,
   connectors,
   catalogs,
+  connectorBrowse,
   catalogLoading,
+  dbListLoading,
   activeSourceId,
   queryHistory,
   propertyGraphs,
@@ -111,6 +129,7 @@ export function Sidebar({
   onProperties,
   onOpenSettings,
   onImportDbTable,
+  onConnectDatabase,
   onNewQueryFromTable,
   etlJobs,
   etlActiveProgress,
@@ -288,8 +307,10 @@ export function Sidebar({
                       <DatabaseConnectorItem
                         key={entry.connector.id}
                         connector={entry.connector}
+                        browse={connectorBrowse?.[entry.connector.id]}
                         catalog={catalogs[entry.connector.id] ?? []}
                         catalogIsLoading={catalogLoading?.[entry.connector.id] ?? false}
+                        databaseListLoading={dbListLoading?.[entry.connector.id] ?? false}
                         dataSources={dataSources}
                         isExpanded={expandedIds.has(`db-${entry.connector.id}`)}
                         onToggleExpand={() => {
@@ -305,6 +326,7 @@ export function Sidebar({
                         onRemove={onConnectorRemove}
                         onRefresh={onConnectorRefresh}
                         onImportTable={onImportDbTable}
+                        onConnectDatabase={onConnectDatabase}
                         onNewQuery={onNewQueryFromTable}
                         onDataSourceSelect={onDataSourceSelect}
                         activeSourceId={activeSourceId}

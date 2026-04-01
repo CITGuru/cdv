@@ -76,12 +76,26 @@ export interface Connector {
   alias?: string | null;
 }
 
+/** Result of `useConnectors().addConnector` (includes catalog when introspection ran). */
+export interface AddConnectorResult {
+  connector: Connector;
+  introspectedCatalog?: CatalogEntry[];
+}
+
 export interface CatalogEntry {
   schema: string | null;
   name: string;
   entry_type: "table" | "view" | "file";
   columns: ColumnInfo[];
   row_count: number | null;
+}
+
+/** Cached browse state per connector (Postgres/Snowflake use database_names + catalogs_by_database). */
+export interface ConnectorBrowseCache {
+  database_names: string[];
+  default_database: string;
+  catalogs_by_database: Record<string, CatalogEntry[]>;
+  attach_aliases_by_database: Record<string, string>;
 }
 
 export interface DataSource {

@@ -10,8 +10,8 @@ use crate::catalog;
 use crate::connector::{ensure_extension, escape_sql_string, get_ops};
 use crate::error::AppError;
 use crate::state::{
-    AppState, CatalogEntry, ConnectorType, EtlJob, JobStatus, SyncStrategy, TableStatus,
-    TableSyncState,
+    AppState, CatalogByDatabase, CatalogEntry, ConnectorType, EtlJob, JobStatus, SecondaryAttach,
+    SyncStrategy, TableStatus, TableSyncState,
 };
 
 // ──────────────────────────── Event payloads ────────────────────────────
@@ -225,7 +225,9 @@ pub fn run_etl_job(
     let catalog_path = state.catalog_path.clone();
     let connectors_map = state.connectors.lock().clone();
     let data_sources_map = state.data_sources.lock().clone();
-    let connector_catalogs_map = state.connector_catalogs.lock().clone();
+    let connector_catalogs_by_db_map = state.connector_catalogs_by_db.lock().clone();
+    let connector_database_names_map = state.connector_database_names.lock().clone();
+    let connector_secondary_attaches_map = state.connector_secondary_attaches.lock().clone();
 
     std::thread::spawn(move || {
         let state_ref: tauri::State<'_, AppState> = app_handle.state();
@@ -242,7 +244,9 @@ pub fn run_etl_job(
             &catalog_path,
             &connectors_map,
             &data_sources_map,
-            &connector_catalogs_map,
+            &connector_catalogs_by_db_map,
+            &connector_database_names_map,
+            &connector_secondary_attaches_map,
         );
     });
 
@@ -253,13 +257,17 @@ fn save_catalog_direct(
     catalog_path: &std::path::Path,
     connectors_map: &std::collections::HashMap<String, crate::state::Connector>,
     data_sources_map: &std::collections::HashMap<String, crate::state::DataSource>,
-    connector_catalogs_map: &std::collections::HashMap<String, Vec<CatalogEntry>>,
+    connector_catalogs_by_db: &std::collections::HashMap<String, CatalogByDatabase>,
+    connector_database_names: &std::collections::HashMap<String, Vec<String>>,
+    connector_secondary_attaches: &std::collections::HashMap<String, Vec<SecondaryAttach>>,
     etl_jobs_map: &std::collections::HashMap<String, EtlJob>,
 ) {
     let catalog = catalog::catalog_from_state(
         connectors_map,
         data_sources_map,
-        connector_catalogs_map,
+        connector_catalogs_by_db,
+        connector_database_names,
+        connector_secondary_attaches,
         etl_jobs_map,
     );
     catalog::save_catalog(catalog_path, &catalog).ok();
@@ -278,7 +286,9 @@ fn execute_etl_job(
     catalog_path: &std::path::Path,
     connectors_map: &std::collections::HashMap<String, crate::state::Connector>,
     data_sources_map: &std::collections::HashMap<String, crate::state::DataSource>,
-    connector_catalogs_map: &std::collections::HashMap<String, Vec<CatalogEntry>>,
+    connector_catalogs_by_db: &std::collections::HashMap<String, CatalogByDatabase>,
+    connector_database_names: &std::collections::HashMap<String, Vec<String>>,
+    connector_secondary_attaches: &std::collections::HashMap<String, Vec<SecondaryAttach>>,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -286,7 +296,15 @@ fn execute_etl_job(
     if let Err(e) = setup_extensions(conn, &source, &target) {
         finish_job_with_error(&mut job, &format!("Extension setup failed: {}", e), etl_jobs_mutex);
         emit_complete(app_handle, &job, 0, 0, start_time);
-        persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+        persist_jobs(
+            etl_jobs_mutex,
+            catalog_path,
+            connectors_map,
+            data_sources_map,
+            connector_catalogs_by_db,
+            connector_database_names,
+            connector_secondary_attaches,
+        );
         return;
     }
 
@@ -297,13 +315,29 @@ fn execute_etl_job(
     if let Err(e) = source_ops.activate(conn, &source) {
         finish_job_with_error(&mut job, &format!("Source activation failed: {}", e), etl_jobs_mutex);
         emit_complete(app_handle, &job, 0, 0, start_time);
-        persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+        persist_jobs(
+            etl_jobs_mutex,
+            catalog_path,
+            connectors_map,
+            data_sources_map,
+            connector_catalogs_by_db,
+            connector_database_names,
+            connector_secondary_attaches,
+        );
         return;
     }
     if let Err(e) = target_ops.activate(conn, &target) {
         finish_job_with_error(&mut job, &format!("Target activation failed: {}", e), etl_jobs_mutex);
         emit_complete(app_handle, &job, 0, 0, start_time);
-        persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+        persist_jobs(
+            etl_jobs_mutex,
+            catalog_path,
+            connectors_map,
+            data_sources_map,
+            connector_catalogs_by_db,
+            connector_database_names,
+            connector_secondary_attaches,
+        );
         return;
     }
 
@@ -313,7 +347,15 @@ fn execute_etl_job(
         Err(e) => {
             finish_job_with_error(&mut job, &format!("Source introspection failed: {}", e), etl_jobs_mutex);
             emit_complete(app_handle, &job, 0, 0, start_time);
-            persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+            persist_jobs(
+                etl_jobs_mutex,
+                catalog_path,
+                connectors_map,
+                data_sources_map,
+                connector_catalogs_by_db,
+                connector_database_names,
+                connector_secondary_attaches,
+            );
             return;
         }
     };
@@ -329,7 +371,15 @@ fn execute_etl_job(
         job.status = JobStatus::Completed;
         etl_jobs_mutex.lock().insert(job.id.clone(), job.clone());
         emit_complete(app_handle, &job, 0, 0, start_time);
-        persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+        persist_jobs(
+            etl_jobs_mutex,
+            catalog_path,
+            connectors_map,
+            data_sources_map,
+            connector_catalogs_by_db,
+            connector_database_names,
+            connector_secondary_attaches,
+        );
         return;
     }
 
@@ -391,7 +441,15 @@ fn execute_etl_job(
             job.status = JobStatus::Cancelled;
             etl_jobs_mutex.lock().insert(job.id.clone(), job.clone());
             emit_complete(app_handle, &job, migrated, failed, start_time);
-            persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+            persist_jobs(
+                etl_jobs_mutex,
+                catalog_path,
+                connectors_map,
+                data_sources_map,
+                connector_catalogs_by_db,
+                connector_database_names,
+                connector_secondary_attaches,
+            );
             return;
         }
 
@@ -482,7 +540,15 @@ fn execute_etl_job(
 
         // Persist after each table for crash recovery
         etl_jobs_mutex.lock().insert(job.id.clone(), job.clone());
-        persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+        persist_jobs(
+            etl_jobs_mutex,
+            catalog_path,
+            connectors_map,
+            data_sources_map,
+            connector_catalogs_by_db,
+            connector_database_names,
+            connector_secondary_attaches,
+        );
     }
 
     job.total_rows_synced = total_rows;
@@ -498,7 +564,15 @@ fn execute_etl_job(
 
     etl_jobs_mutex.lock().insert(job.id.clone(), job.clone());
     emit_complete(app_handle, &job, migrated, failed, start_time);
-    persist_jobs(etl_jobs_mutex, catalog_path, connectors_map, data_sources_map, connector_catalogs_map);
+    persist_jobs(
+        etl_jobs_mutex,
+        catalog_path,
+        connectors_map,
+        data_sources_map,
+        connector_catalogs_by_db,
+        connector_database_names,
+        connector_secondary_attaches,
+    );
 
     // Cleanup: detach the cloned connection's attachments
     source_ops.deactivate(conn, &source).ok();
@@ -742,14 +816,18 @@ fn persist_jobs(
     catalog_path: &std::path::Path,
     connectors_map: &std::collections::HashMap<String, crate::state::Connector>,
     data_sources_map: &std::collections::HashMap<String, crate::state::DataSource>,
-    connector_catalogs_map: &std::collections::HashMap<String, Vec<CatalogEntry>>,
+    connector_catalogs_by_db: &std::collections::HashMap<String, CatalogByDatabase>,
+    connector_database_names: &std::collections::HashMap<String, Vec<String>>,
+    connector_secondary_attaches: &std::collections::HashMap<String, Vec<SecondaryAttach>>,
 ) {
     let jobs = etl_jobs_mutex.lock().clone();
     save_catalog_direct(
         catalog_path,
         connectors_map,
         data_sources_map,
-        connector_catalogs_map,
+        connector_catalogs_by_db,
+        connector_database_names,
+        connector_secondary_attaches,
         &jobs,
     );
 }

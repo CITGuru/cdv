@@ -53,6 +53,11 @@ pub fn run() {
                         eprintln!("Failed to activate connector '{}': {}", c.name, e);
                     }
                 }
+                connector::rehydrate_secondary_attaches(
+                    &conn,
+                    &cat.connector_secondary_attaches,
+                    &cat.connectors,
+                );
 
                 if let Err(e) = {
                     let connector_map: std::collections::HashMap<String, state::Connector> =
@@ -69,7 +74,9 @@ pub fn run() {
             for ds in cat.data_sources {
                 state.data_sources.lock().insert(ds.id.clone(), ds);
             }
-            *state.connector_catalogs.lock() = cat.connector_catalogs;
+            *state.connector_catalogs_by_db.lock() = cat.connector_catalogs_by_db;
+            *state.connector_database_names.lock() = cat.connector_database_names;
+            *state.connector_secondary_attaches.lock() = cat.connector_secondary_attaches;
             for job in cat.etl_jobs {
                 state.etl_jobs.lock().insert(job.id.clone(), job);
             }
@@ -101,6 +108,8 @@ pub fn run() {
             connector::get_cached_catalogs,
             connector::list_connectors,
             connector::list_pg_databases,
+            connector::list_connector_databases,
+            connector::connect_connector_database,
             export_service::export_data,
             settings::get_settings,
             settings::set_settings,

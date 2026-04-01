@@ -55,6 +55,7 @@ import type {
   CatalogEntry,
   FilePreview,
   Driver,
+  AddConnectorResult,
 } from "@/lib/types";
 import { DRIVER_OPTIONS, supportedDrivers, defaultDriver } from "@/lib/types";
 import type { ParsedError } from "@/lib/errors";
@@ -161,7 +162,7 @@ interface AddDataSourceModalProps {
     config: ConnectorConfig;
     accessKey?: string;
     secretKey?: string;
-  }) => Promise<Connector>;
+  }) => Promise<AddConnectorResult>;
   onTestConnector?: (params: {
     connectorType: ConnectorType;
     config: ConnectorConfig;
@@ -555,7 +556,7 @@ export function AddDataSourceModal({
       } else {
         let connId = fileConnectorId;
         if (!connId && onAddConnector) {
-          const conn = await onAddConnector({
+          const { connector: conn } = await onAddConnector({
             name,
             connectorType: "local_file" as ConnectorType,
             config: {
@@ -618,13 +619,14 @@ export function AddDataSourceModal({
     setError(null);
     try {
       if (onAddConnector) {
-        const conn = await onAddConnector({
+        const { connector: conn, introspectedCatalog } = await onAddConnector({
           name: name.trim(),
           connectorType: isDuckdb ? "duckdb" : "sqlite",
           config: { path },
         });
         setDbConnectorId(conn.id);
-        const entries = await introspectConnector(conn.id);
+        const entries =
+          introspectedCatalog ?? (await introspectConnector(conn.id));
         setDbCatalog(entries);
         setStep("select-tables");
       }
@@ -709,14 +711,15 @@ export function AddDataSourceModal({
     setError(null);
     try {
       if (onAddConnector) {
-        const conn = await onAddConnector({
+        const { connector: conn, introspectedCatalog } = await onAddConnector({
           name: name.trim(),
           connectorType: "postgresql",
           config: getDbConfig(),
           secretKey: getDbSecretKey(),
         });
         setDbConnectorId(conn.id);
-        const entries = await introspectConnector(conn.id);
+        const entries =
+          introspectedCatalog ?? (await introspectConnector(conn.id));
         setDbCatalog(entries);
         setStep("select-tables");
       }
@@ -771,7 +774,7 @@ export function AddDataSourceModal({
     setError(null);
     try {
       if (onAddConnector) {
-        const conn = await onAddConnector({
+        const { connector: conn, introspectedCatalog } = await onAddConnector({
           name: name.trim(),
           connectorType: "snowflake",
           config: {
@@ -783,7 +786,8 @@ export function AddDataSourceModal({
           secretKey: getDbSecretKey(),
         });
         setDbConnectorId(conn.id);
-        const entries = await introspectConnector(conn.id);
+        const entries =
+          introspectedCatalog ?? (await introspectConnector(conn.id));
         setDbCatalog(entries);
         setStep("select-tables");
       }
@@ -855,13 +859,14 @@ export function AddDataSourceModal({
     setError(null);
     try {
       if (onAddConnector) {
-        const conn = await onAddConnector({
+        const { connector: conn, introspectedCatalog } = await onAddConnector({
           name: name.trim(),
           connectorType: "ducklake",
           config: getDuckLakeConfig(),
         });
         setDbConnectorId(conn.id);
-        const entries = await introspectConnector(conn.id);
+        const entries =
+          introspectedCatalog ?? (await introspectConnector(conn.id));
         setDbCatalog(entries);
         setStep("select-tables");
       }

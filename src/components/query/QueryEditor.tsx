@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import Editor, { type Monaco } from "@monaco-editor/react";
 import type { editor as monacoEditor, IDisposable, Position } from "monaco-editor";
 import { Play, Loader2, Keyboard } from "lucide-react";
@@ -25,12 +25,36 @@ const DOT_RE = /\b"?(\w+)"?\.\s*("?)(\w*)$/im;
 const COLUMN_CONTEXT_RE = /(?:\b(?:SELECT|WHERE|AND|OR|ON|SET|HAVING|BY)\s+|,\s*)\w*$/im;
 const REFERENCED_TABLES_RE = /\b(?:FROM|JOIN)\s+"?(\w+)"?/gim;
 
+function resolveSqlToRun(
+  editor: monacoEditor.IStandaloneCodeEditor | null,
+  fallbackDocumentSql: string
+): { sqlToRun: string; runsSelection: boolean } {
+  if (editor) {
+    const model = editor.getModel();
+    const sel = editor.getSelection();
+    if (model && sel && !sel.isEmpty()) {
+      const fromSelection = model.getValueInRange(sel).trim();
+      if (fromSelection) return { sqlToRun: fromSelection, runsSelection: true };
+    }
+    return { sqlToRun: editor.getValue().trim(), runsSelection: false };
+  }
+  return { sqlToRun: fallbackDocumentSql.trim(), runsSelection: false };
+}
+
 export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataSources = [], connectors: _connectors = [], catalogs: _catalogs = {} }: QueryEditorProps) {
   const [sql, setSql] = useState(initialSql ?? "SELECT * FROM ");
+  const [selectionTick, setSelectionTick] = useState(0);
+  const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
   const completionDisposableRef = useRef<IDisposable | null>(null);
+  const selectionDisposableRef = useRef<IDisposable | null>(null);
   const dataSourcesRef = useRef(dataSources);
   dataSourcesRef.current = dataSources;
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { sqlToRun, runsSelection } = useMemo(
+    () => resolveSqlToRun(editorRef.current, sql),
+    [sql, selectionTick]
+  );
 
   useEffect(() => {
     if (initialSql) {
@@ -41,6 +65,8 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
   useEffect(() => {
     return () => {
       completionDisposableRef.current?.dispose();
+      selectionDisposableRef.current?.dispose();
+      editorRef.current = null;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
@@ -58,20 +84,25 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
   );
 
   const handleExecute = useCallback(() => {
-    const trimmed = sql.trim();
-    if (trimmed) {
-      onExecute(trimmed);
-    }
+    const { sqlToRun: text } = resolveSqlToRun(editorRef.current, sql);
+    if (text) onExecute(text);
   }, [sql, onExecute]);
 
   const handleMount = useCallback(
     (editor: monacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
+      editorRef.current = editor;
+      selectionDisposableRef.current?.dispose();
+      selectionDisposableRef.current = editor.onDidChangeCursorSelection(() => {
+        setSelectionTick((t) => t + 1);
+      });
+      setSelectionTick((t) => t + 1);
+
       editor.addAction({
-        id: "run-query",
-        label: "Run Query",
+        id: "run-feature",
+        label: "Run feature",
         keybindings: [2048 | 3],
         run: () => {
-          const text = editor.getValue().trim();
+          const { sqlToRun: text } = resolveSqlToRun(editor, "");
           if (text) onExecute(text);
         },
       });
@@ -185,26 +216,38 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-card shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground">SQL Editor</span>
-          <Badge variant="outline" className="text-[10px] gap-1 px-1.5 py-0 h-5 text-muted-foreground">
-            <Keyboard className="size-2.5" />
-            Ctrl+Enter
-          </Badge>
+      <div className="flex items-start justify-between gap-3 px-3 py-1.5 border-b border-border bg-card shrink-0">
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-muted-foreground">Feature</span>
+            <Badge
+              variant="outline"
+              className="text-[10px] gap-1 px-1.5 py-0 h-5 text-muted-foreground"
+              title="SQL Editor"
+            >
+              <Keyboard className="size-2.5" />
+              Ctrl+Enter
+            </Badge>
+          </div>
+
         </div>
         <Button
           size="sm"
           onClick={handleExecute}
-          disabled={loading || !sql.trim()}
-          className="gap-1.5 text-xs"
+          disabled={loading || !sqlToRun}
+          className="gap-1.5 text-xs shrink-0 mt-0.5"
+          title={
+            runsSelection
+              ? "Run only the highlighted SQL"
+              : "Run all SQL in the editor"
+          }
         >
           {loading ? (
             <Loader2 className="size-3.5 animate-spin" />
           ) : (
             <Play className="size-3.5" />
           )}
-          {loading ? "Running..." : "Run Query"}
+          {loading ? "Running…" : runsSelection ? "Run selection" : "Run feature"}
         </Button>
       </div>
       <div className="flex-1">

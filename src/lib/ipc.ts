@@ -6,6 +6,7 @@ import type {
   ConnectorType,
   ConnectorConfig,
   CatalogEntry,
+  ConnectorBrowseCache,
   FilePreview,
   Settings,
   PersistedWorkspace,
@@ -37,6 +38,8 @@ export async function createDataSource(params: {
   primaryKeyColumn?: string | null;
   dbSchema?: string;
   dbTable?: string;
+  /** Postgres / Snowflake database name when importing from a non-default attached DB */
+  dbDatabase?: string | null;
   driver?: Driver;
 }): Promise<DataSource> {
   return invoke("create_data_source", {
@@ -47,6 +50,7 @@ export async function createDataSource(params: {
     primaryKeyColumn: params.primaryKeyColumn ?? null,
     dbSchema: params.dbSchema ?? null,
     dbTable: params.dbTable ?? null,
+    dbDatabase: params.dbDatabase ?? null,
     driver: params.driver ?? null,
   });
 }
@@ -147,8 +151,30 @@ export async function listConnectors(): Promise<Connector[]> {
   return invoke("list_connectors");
 }
 
-export async function getCachedCatalogs(): Promise<Record<string, CatalogEntry[]>> {
+export async function getCachedCatalogs(): Promise<
+  Record<string, ConnectorBrowseCache>
+> {
   return invoke("get_cached_catalogs");
+}
+
+export async function listConnectorDatabases(
+  connectorId: string,
+  options?: { refresh?: boolean }
+): Promise<string[]> {
+  return invoke("list_connector_databases", {
+    id: connectorId,
+    refresh: options?.refresh ?? null,
+  });
+}
+
+export async function connectConnectorDatabase(
+  connectorId: string,
+  database: string
+): Promise<CatalogEntry[]> {
+  return invoke("connect_connector_database", {
+    id: connectorId,
+    database,
+  });
 }
 
 export async function listPgDatabases(params: {

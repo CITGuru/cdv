@@ -34,6 +34,7 @@ import type {
   ConnectorType,
   CatalogEntry,
   SyncStrategy,
+  AddConnectorResult,
 } from "@/lib/types";
 import { SYNC_STRATEGIES } from "@/lib/types";
 import type { ParsedError } from "@/lib/errors";
@@ -59,7 +60,7 @@ interface EtlJobModalProps {
     name: string;
     connectorType: ConnectorType;
     config: ConnectorConfig;
-  }) => Promise<Connector>;
+  }) => Promise<AddConnectorResult>;
   onSubmit: (params: {
     name: string;
     sourceConnectorId: string;
@@ -151,6 +152,8 @@ export function EtlJobModal({ open, onClose, connectors, onAddConnector, onSubmi
     }
   }, [open]);
 
+  // PostgreSQL ETL jobs introspect the connector's configured default database only.
+  // Other databases on the server are not included until per-database ETL support exists.
   useEffect(() => {
     if (sourceId && open) {
       setSourceLoading(true);
@@ -267,7 +270,7 @@ export function EtlJobModal({ open, onClose, connectors, onAddConnector, onSubmi
             ? newDlForm.pgDatabase
             : newDlForm.metadataPath.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "") ?? "ducklake"
         );
-        const conn = await onAddConnector({
+        const { connector: conn } = await onAddConnector({
           name,
           connectorType: "ducklake",
           config: buildDuckLakeConfig(),

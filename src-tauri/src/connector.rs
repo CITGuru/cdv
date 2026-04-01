@@ -1,13 +1,19 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use duckdb::params;
 use duckdb::Connection;
+use serde::Serialize;
 use tauri::State;
 
 use crate::catalog;
 use crate::error::AppError;
-use crate::state::{AppState, CatalogEntry, ColumnInfo, Connector, ConnectorConfig, ConnectorType};
+use crate::state::{
+    catalog_db_key_for_connector, is_multi_database_connector, normalize_snowflake_database_name,
+    AppState, CatalogEntry, ColumnInfo, SINGLE_DB_CATALOG_KEY,
+    Connector, ConnectorConfig, ConnectorType, SecondaryAttach,
+};
 
 pub trait ConnectorOps {
     fn activate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError>;
@@ -44,6 +50,220 @@ fn sanitize_alias(name: &str) -> String {
         format!("db_{}", trimmed)
     } else {
         trimmed
+    }
+}
+
+fn make_secondary_attach_alias(connector: &Connector, database: &str) -> String {
+    let base = connector.alias.as_deref().unwrap_or("db");
+    let id_frag: String = connector
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect();
+    let db_part = sanitize_alias(database);
+    let mut s = format!("{}__{}_{}", base, id_frag, db_part);
+    const MAX: usize = 115;
+    if s.len() > MAX {
+        s.truncate(MAX);
+    }
+    s.trim_end_matches('_').to_string()
+}
+
+fn snowflake_secondary_secret_name(connector: &Connector, database: &str) -> String {
+    let db_part = sanitize_alias(database);
+    let short_id: String = connector.id.chars().filter(|c| *c != '-').take(10).collect();
+    format!("cdv_sf_{}_{}", short_id, db_part)
+}
+
+fn build_snowflake_secret_sql(connector: &Connector, database: &str, secret_name: &str) -> Result<String, AppError> {
+    let cfg = &connector.config;
+    let raw_host = cfg
+        .host
+        .as_deref()
+        .ok_or_else(|| AppError::ConnectorError("Snowflake connector missing account".into()))?;
+    let account = extract_snowflake_account(raw_host);
+
+    let mut secret_parts = vec![
+        "TYPE snowflake".to_string(),
+        format!("ACCOUNT '{}'", escape_sql_string(account)),
+        format!("DATABASE '{}'", escape_sql_string(database)),
+    ];
+    if let Some(user) = cfg.user.as_deref().filter(|s| !s.is_empty()) {
+        secret_parts.push(format!("USER '{}'", escape_sql_string(user)));
+    }
+    if let Some(password) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
+        secret_parts.push(format!("PASSWORD '{}'", escape_sql_string(password)));
+    }
+    if let Some(wh) = cfg.warehouse.as_deref().filter(|s| !s.is_empty()) {
+        secret_parts.push(format!("WAREHOUSE '{}'", escape_sql_string(wh)));
+    }
+
+    Ok(format!(
+        "CREATE SECRET \"{}\" ({})",
+        secret_name,
+        secret_parts.join(", ")
+    ))
+}
+
+fn attach_snowflake_with_secret(
+    conn: &Connection,
+    attach_alias: &str,
+    secret_name: &str,
+) -> Result<(), AppError> {
+    let attach_sql = format!(
+        "ATTACH '' AS \"{}\" (TYPE snowflake, SECRET \"{}\", READ_ONLY)",
+        attach_alias.replace('"', ""),
+        secret_name.replace('"', "")
+    );
+    conn.execute_batch(&attach_sql).map_err(|e| {
+        AppError::ConnectorError(format!("Failed to attach Snowflake database: {}", e))
+    })?;
+    Ok(())
+}
+
+fn attach_postgres_database(
+    conn: &Connection,
+    connector: &Connector,
+    database: &str,
+    attach_alias: &str,
+) -> Result<(), AppError> {
+    ensure_extension(conn, "postgres")?;
+    let mut cfg = connector.config.clone();
+    cfg.database = Some(database.to_string());
+    let connstr = build_pg_connstr(&cfg)?;
+    let safe_alias = attach_alias.replace('"', "");
+    let sql = format!(
+        "ATTACH '{}' AS \"{}\" (TYPE POSTGRES, READ_ONLY)",
+        escape_sql_string(&connstr),
+        safe_alias
+    );
+    conn.execute_batch(&sql)
+        .map_err(|e| AppError::ConnectorError(format!("Failed to attach PostgreSQL: {}", e)))?;
+    Ok(())
+}
+
+fn detach_alias(conn: &Connection, alias: &str) {
+    let safe = alias.replace('"', "");
+    conn.execute_batch(&format!("DETACH \"{}\"", safe)).ok();
+}
+
+fn drop_secret_if_exists(conn: &Connection, name: &str) {
+    let safe = name.replace('"', "");
+    conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", safe)).ok();
+}
+
+fn detach_secondary_attaches(conn: &Connection, secondaries: &[SecondaryAttach]) {
+    for s in secondaries {
+        detach_alias(conn, &s.attach_alias);
+        if let Some(sn) = &s.secret_name {
+            drop_secret_if_exists(conn, sn);
+        }
+    }
+}
+
+/// Resolve DuckDB attach alias for import/query (`"alias"."schema"."table"`).
+pub(crate) fn resolve_attach_alias_for_database(
+    connector: &Connector,
+    database: Option<&str>,
+    secondaries: &[SecondaryAttach],
+) -> Result<String, AppError> {
+    let base_alias = connector
+        .alias
+        .as_deref()
+        .ok_or_else(|| AppError::ConnectorError("Database connector missing alias".into()))?;
+    let default_key = catalog_db_key_for_connector(connector);
+    let db_owned: String = if let Some(d) = database.filter(|s| !s.is_empty()) {
+        if matches!(connector.connector_type, ConnectorType::Snowflake) {
+            normalize_snowflake_database_name(d)
+        } else {
+            d.to_string()
+        }
+    } else {
+        default_key.clone()
+    };
+    let db = db_owned.as_str();
+    if db == default_key.as_str() {
+        return Ok(base_alias.to_string());
+    }
+    for s in secondaries {
+        let matches = if matches!(connector.connector_type, ConnectorType::Snowflake) {
+            normalize_snowflake_database_name(&s.database) == db_owned
+        } else {
+            s.database == db_owned
+        };
+        if matches {
+            return Ok(s.attach_alias.clone());
+        }
+    }
+    Err(AppError::ConnectorError(format!(
+        "Database '{}' is not connected for this connector",
+        db
+    )))
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct ConnectorBrowseCache {
+    #[serde(default)]
+    pub database_names: Vec<String>,
+    pub default_database: String,
+    #[serde(default)]
+    pub catalogs_by_database: HashMap<String, Vec<CatalogEntry>>,
+    /// DuckDB attach alias per database name (for building qualified SQL in the UI).
+    #[serde(default)]
+    pub attach_aliases_by_database: HashMap<String, String>,
+}
+
+pub fn rehydrate_secondary_attaches(
+    conn: &Connection,
+    secondary_map: &HashMap<String, Vec<SecondaryAttach>>,
+    connectors: &[Connector],
+) {
+    for (id, attaches) in secondary_map {
+        let Some(connector) = connectors.iter().find(|c| &c.id == id) else {
+            continue;
+        };
+        if !matches!(
+            connector.connector_type,
+            ConnectorType::PostgreSQL | ConnectorType::Snowflake
+        ) {
+            continue;
+        }
+        for s in attaches {
+            match connector.connector_type {
+                ConnectorType::PostgreSQL => {
+                    if let Err(e) =
+                        attach_postgres_database(conn, connector, &s.database, &s.attach_alias)
+                    {
+                        eprintln!(
+                            "Rehydrate PG secondary '{}' / {}: {}",
+                            connector.name, s.database, e
+                        );
+                    }
+                }
+                ConnectorType::Snowflake => {
+                    let secret_name = s.secret_name.clone().unwrap_or_else(|| {
+                        snowflake_secondary_secret_name(connector, &s.database)
+                    });
+                    if connector.config.password.as_deref().filter(|p| !p.is_empty()).is_some() {
+                        if let Ok(sql) =
+                            build_snowflake_secret_sql(connector, &s.database, &secret_name)
+                        {
+                            conn.execute_batch(&sql).ok();
+                        }
+                    }
+                    if let Err(e) =
+                        attach_snowflake_with_secret(conn, &s.attach_alias, &secret_name)
+                    {
+                        eprintln!(
+                            "Rehydrate Snowflake secondary '{}' / {}: {}",
+                            connector.name, s.database, e
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -710,11 +930,25 @@ fn ensure_adbc_snowflake_driver(conn: &Connection) -> Result<(), AppError> {
 
 pub struct SnowflakeOps;
 
+/// DuckDB secret name for the connector's default Snowflake database.
+/// Must be stable across app restarts: passwords are not serialized, but the secret
+/// can remain inside `cdv.duckdb`, so reload must use the same name as `add_connector`
+/// (`cdv_{id}`), not a name derived only from alias (older fallback broke rehydrate).
 fn snowflake_secret_name(connector: &Connector) -> String {
-    connector
-        .secret_name
-        .clone()
-        .unwrap_or_else(|| format!("cdv_sf_{}", connector.alias.as_deref().unwrap_or("sf")))
+    connector.secret_name.clone().unwrap_or_else(|| {
+        format!(
+            "cdv_{}",
+            connector.id.replace('-', "_")
+        )
+    })
+}
+
+/// Older builds fell back to this when `secret_name` was missing after deserialize.
+fn snowflake_legacy_secret_name(connector: &Connector) -> String {
+    format!(
+        "cdv_sf_{}",
+        connector.alias.as_deref().unwrap_or("sf")
+    )
 }
 
 fn extract_snowflake_account(host: &str) -> &str {
@@ -745,40 +979,71 @@ impl ConnectorOps for SnowflakeOps {
             .ok_or_else(|| AppError::ConnectorError("Snowflake connector missing alias".into()))?;
 
         let secret_name = snowflake_secret_name(connector);
+        let has_password = cfg
+            .password
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
 
-        let mut secret_parts = vec![
-            "TYPE snowflake".to_string(),
-            format!("ACCOUNT '{}'", escape_sql_string(account)),
-            format!("DATABASE '{}'", escape_sql_string(database)),
-        ];
-        if let Some(user) = cfg.user.as_deref().filter(|s| !s.is_empty()) {
-            secret_parts.push(format!("USER '{}'", escape_sql_string(user)));
+        if has_password {
+            detach_alias(conn, alias);
+            drop_secret_if_exists(conn, &secret_name);
+
+            let mut secret_parts = vec![
+                "TYPE snowflake".to_string(),
+                format!("ACCOUNT '{}'", escape_sql_string(account)),
+                format!("DATABASE '{}'", escape_sql_string(database)),
+            ];
+            if let Some(user) = cfg.user.as_deref().filter(|s| !s.is_empty()) {
+                secret_parts.push(format!("USER '{}'", escape_sql_string(user)));
+            }
+            let pw = cfg
+                .password
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::ConnectorError("Snowflake connector missing password".into())
+                })?;
+            secret_parts.push(format!("PASSWORD '{}'", escape_sql_string(pw)));
+            if let Some(wh) = cfg.warehouse.as_deref().filter(|s| !s.is_empty()) {
+                secret_parts.push(format!("WAREHOUSE '{}'", escape_sql_string(wh)));
+            }
+
+            let secret_sql = format!(
+                "CREATE SECRET \"{}\" ({})",
+                secret_name.replace('"', ""),
+                secret_parts.join(", ")
+            );
+            conn.execute_batch(&secret_sql).map_err(|e| {
+                AppError::ConnectorError(format!("Failed to create Snowflake secret: {}", e))
+            })?;
+
+            attach_snowflake_with_secret(conn, alias, &secret_name)?;
+            return Ok(());
         }
-        if let Some(password) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
-            secret_parts.push(format!("PASSWORD '{}'", escape_sql_string(password)));
+
+        // No password in memory (normal after restart: passwords are not persisted). The secret
+        // may still exist inside the persistent DuckDB file from the last session—attach only.
+        detach_alias(conn, alias);
+        let attach_err = match attach_snowflake_with_secret(conn, alias, &secret_name) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+
+        let legacy = snowflake_legacy_secret_name(connector);
+        if legacy != secret_name {
+            if attach_snowflake_with_secret(conn, alias, &legacy).is_ok() {
+                return Ok(());
+            }
         }
-        if let Some(wh) = cfg.warehouse.as_deref().filter(|s| !s.is_empty()) {
-            secret_parts.push(format!("WAREHOUSE '{}'", escape_sql_string(wh)));
-        }
 
-        let secret_sql = format!(
-            "CREATE SECRET \"{}\" ({})",
-            secret_name,
-            secret_parts.join(", ")
-        );
-        conn.execute_batch(&secret_sql).map_err(|e| {
-            AppError::ConnectorError(format!("Failed to create Snowflake secret: {}", e))
-        })?;
-
-        let attach_sql = format!(
-            "ATTACH '' AS \"{}\" (TYPE snowflake, SECRET \"{}\", READ_ONLY)",
-            alias, secret_name
-        );
-        conn.execute_batch(&attach_sql).map_err(|e| {
-            AppError::ConnectorError(format!("Failed to attach Snowflake database: {}", e))
-        })?;
-
-        Ok(())
+        Err(AppError::ConnectorError(format!(
+            "Snowflake: credentials are not in memory (passwords are never saved to catalog.json). \
+             Could not re-use a stored DuckDB secret—often after deleting cdv.duckdb or on a new machine. \
+             Open the connection, enter your password again, and connect. \
+             Detail: {}",
+            attach_err
+        )))
     }
 
     fn deactivate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
@@ -805,7 +1070,12 @@ impl ConnectorOps for SnowflakeOps {
             .ok_or_else(|| {
                 AppError::ConnectorError("Snowflake connector missing alias".into())
             })?;
-        introspect_attached_snowflake(conn, alias)
+        let database = connector
+            .config
+            .database
+            .as_deref()
+            .unwrap_or("");
+        introspect_attached_snowflake(conn, alias, database)
     }
 
     fn test(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
@@ -1135,29 +1405,150 @@ fn introspect_attached_postgres(
     Ok(entries)
 }
 
+fn snowflake_info_schema_entry_type(table_type: &str) -> &'static str {
+    let u = table_type.trim().to_ascii_uppercase();
+    if u.is_empty() {
+        return "table";
+    }
+    match u.as_str() {
+        "VIEW" | "MATERIALIZED VIEW" => "view",
+        _ if u == "BASE TABLE"
+            || u == "TABLE"
+            || u == "TEMPORARY TABLE"
+            || u == "TRANSIENT TABLE"
+            || u == "EXTERNAL TABLE"
+            || u == "EVENT TABLE"
+            || u == "DYNAMIC TABLE"
+            || u == "ICEBERG TABLE" =>
+        {
+            "table"
+        }
+        _ if u.ends_with(" VIEW") && !u.contains("TABLE") => "view",
+        _ if u.contains("VIEW") && !u.contains("TABLE") => "view",
+        _ => "table",
+    }
+}
+
+fn snowflake_object_key(schema: &str, name: &str) -> (String, String) {
+    (
+        schema.trim().to_ascii_uppercase(),
+        name.trim().to_ascii_uppercase(),
+    )
+}
+
+fn quote_ident_segment(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
+/// Merge objects exposed by DuckDB's catalog functions (some Snowflake + DuckDB builds
+/// omit or under-report rows in `INFORMATION_SCHEMA.TABLES` while still listing relations
+/// in `duckdb_tables()` / `duckdb_views()`).
+fn supplement_snowflake_from_duckdb_catalog(
+    conn: &Connection,
+    alias: &str,
+    tables: &mut Vec<SnowflakeTableRow>,
+) -> Result<(), AppError> {
+    let safe = alias.replace('"', "");
+    let esc = escape_sql_string(&safe);
+    let mut known: std::collections::HashSet<(String, String)> = tables
+        .iter()
+        .map(|t| snowflake_object_key(&t.schema, &t.name))
+        .collect();
+
+    let sql = format!(
+        "SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = '{}'",
+        esc
+    );
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(rows) = stmt.query_map(params![], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for r in rows.flatten() {
+                let k = snowflake_object_key(&r.0, &r.1);
+                if known.insert(k) {
+                    tables.push(SnowflakeTableRow {
+                        schema: r.0,
+                        name: r.1,
+                        table_type: "BASE TABLE".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    let sql_v = format!(
+        "SELECT schema_name, view_name FROM duckdb_views() WHERE database_name = '{}' AND NOT internal",
+        esc
+    );
+    if let Ok(mut stmt) = conn.prepare(&sql_v) {
+        if let Ok(rows) = stmt.query_map(params![], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for r in rows.flatten() {
+                let k = snowflake_object_key(&r.0, &r.1);
+                if known.insert(k) {
+                    tables.push(SnowflakeTableRow {
+                        schema: r.0,
+                        name: r.1,
+                        table_type: "VIEW".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct SnowflakeTableRow {
+    schema: String,
+    name: String,
+    table_type: String,
+}
+
 /// Snowflake-optimised introspection: fetches all table and column metadata in
 /// just 2 bulk queries over the network instead of per-table DESCRIBE + COUNT.
+///
+/// Queries must use the **attached catalog** (`"{alias}"."INFORMATION_SCHEMA"`),
+/// not bare `information_schema` (that is DuckDB's own catalog and returns no
+/// Snowflake tables).
+///
+/// `table_catalog` varies by driver: DuckDB's Snowflake attach often reports the
+/// **attach alias**; some paths use the Snowflake **database** name. We filter with
+/// OR so both match (avoids empty catalogs when only one form appears).
 fn introspect_attached_snowflake(
     conn: &Connection,
     alias: &str,
+    snowflake_database: &str,
 ) -> Result<Vec<CatalogEntry>, AppError> {
+    let safe_alias = alias.replace('"', "");
+    let db_trim = snowflake_database.trim();
+    let catalog_predicate = if db_trim.is_empty() {
+        format!(
+            "UPPER(TRIM(table_catalog)) = UPPER('{}')",
+            escape_sql_string(&safe_alias)
+        )
+    } else {
+        format!(
+            "(UPPER(TRIM(table_catalog)) = UPPER('{}') OR UPPER(TRIM(table_catalog)) = UPPER('{}'))",
+            escape_sql_string(&safe_alias),
+            escape_sql_string(db_trim)
+        )
+    };
+
     let tables_sql = format!(
-        "SELECT table_schema, table_name, table_type \
-         FROM information_schema.tables \
-         WHERE table_catalog = '{}'",
-        escape_sql_string(alias)
+        r#"SELECT table_schema, table_name, table_type
+         FROM "{}"."INFORMATION_SCHEMA"."TABLES"
+         WHERE {}
+           AND table_schema NOT IN ('INFORMATION_SCHEMA')"#,
+        safe_alias, catalog_predicate
     );
     let mut stmt = conn.prepare(&tables_sql)?;
 
-    struct TableInfo {
-        schema: String,
-        name: String,
-        table_type: String,
-    }
-
-    let tables: Vec<TableInfo> = stmt
+    let mut tables: Vec<SnowflakeTableRow> = stmt
         .query_map(params![], |row| {
-            Ok(TableInfo {
+            Ok(SnowflakeTableRow {
                 schema: row.get(0)?,
                 name: row.get(1)?,
                 table_type: row.get(2)?,
@@ -1166,13 +1557,52 @@ fn introspect_attached_snowflake(
         .filter_map(|r| r.ok())
         .collect();
 
-    let columns_sql = format!(
-        "SELECT table_schema, table_name, column_name, data_type, is_nullable \
-         FROM information_schema.columns \
-         WHERE table_catalog = '{}' \
-         ORDER BY table_schema, table_name, ordinal_position",
-        escape_sql_string(alias)
-    );
+    let mut use_catalog_fallback = false;
+    if tables.is_empty() {
+        let fallback_tables = format!(
+            r#"SELECT table_schema, table_name, table_type
+         FROM "{}"."INFORMATION_SCHEMA"."TABLES"
+         WHERE table_schema NOT IN ('INFORMATION_SCHEMA')"#,
+            safe_alias
+        );
+        if let Ok(mut fb) = conn.prepare(&fallback_tables) {
+            if let Ok(mapped) = fb.query_map(params![], |row| {
+                Ok(SnowflakeTableRow {
+                    schema: row.get(0)?,
+                    name: row.get(1)?,
+                    table_type: row.get(2)?,
+                })
+            }) {
+                tables = mapped.filter_map(|r| r.ok()).collect();
+                use_catalog_fallback = !tables.is_empty();
+            }
+        }
+    }
+
+    supplement_snowflake_from_duckdb_catalog(conn, alias, &mut tables)?;
+
+    let mut seen_obj: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    tables.retain(|t| seen_obj.insert(snowflake_object_key(&t.schema, &t.name)));
+
+    let columns_sql = if use_catalog_fallback {
+        format!(
+            r#"SELECT table_schema, table_name, column_name, data_type, is_nullable
+         FROM "{}"."INFORMATION_SCHEMA"."COLUMNS"
+         WHERE table_schema NOT IN ('INFORMATION_SCHEMA')
+         ORDER BY table_schema, table_name, ordinal_position"#,
+            safe_alias
+        )
+    } else {
+        format!(
+            r#"SELECT table_schema, table_name, column_name, data_type, is_nullable
+         FROM "{}"."INFORMATION_SCHEMA"."COLUMNS"
+         WHERE {}
+           AND table_schema NOT IN ('INFORMATION_SCHEMA')
+         ORDER BY table_schema, table_name, ordinal_position"#,
+            safe_alias, catalog_predicate
+        )
+    };
 
     let mut columns_map: std::collections::HashMap<(String, String), Vec<ColumnInfo>> =
         std::collections::HashMap::new();
@@ -1186,11 +1616,11 @@ fn introspect_attached_snowflake(
             Ok((schema, table, col_name, data_type, nullable_str))
         }) {
             for r in rows.flatten() {
-                let key = (r.0, r.1);
+                let key = snowflake_object_key(&r.0, &r.1);
                 columns_map.entry(key).or_default().push(ColumnInfo {
                     name: r.2,
                     data_type: r.3,
-                    nullable: r.4 == "YES",
+                    nullable: r.4.eq_ignore_ascii_case("yes"),
                     key: None,
                 });
             }
@@ -1199,23 +1629,66 @@ fn introspect_attached_snowflake(
 
     let mut entries = Vec::with_capacity(tables.len());
     for t in &tables {
-        let key = (t.schema.clone(), t.name.clone());
-        let columns = columns_map.remove(&key).unwrap_or_default();
-        let entry_type = if t.table_type.contains("VIEW") {
-            "view"
-        } else {
-            "table"
+        let key = snowflake_object_key(&t.schema, &t.name);
+        let mut columns = columns_map.remove(&key).unwrap_or_default();
+
+        if columns.is_empty() {
+            let sch_raw = t.schema.trim();
+            let sch = if sch_raw.is_empty() {
+                "PUBLIC"
+            } else {
+                sch_raw
+            };
+            let qualified = format!(
+                "\"{}\".\"{}\".\"{}\"",
+                safe_alias,
+                quote_ident_segment(sch),
+                quote_ident_segment(t.name.trim())
+            );
+            if let Ok(cols) = describe_ref(conn, &qualified) {
+                columns = cols;
+            }
+        }
+
+        let schema_out = {
+            let s = t.schema.trim();
+            if s.is_empty() {
+                "PUBLIC".to_string()
+            } else {
+                s.to_string()
+            }
         };
+
+        let entry_type = snowflake_info_schema_entry_type(&t.table_type).to_string();
         entries.push(CatalogEntry {
-            schema: Some(t.schema.clone()),
-            name: t.name.clone(),
-            entry_type: entry_type.to_string(),
+            schema: Some(schema_out),
+            name: t.name.trim().to_string(),
+            entry_type,
             columns,
             row_count: None,
         });
     }
 
     Ok(entries)
+}
+
+fn introspect_catalog_for_server_alias(
+    ct: ConnectorType,
+    conn: &Connection,
+    alias: &str,
+    snowflake_database: Option<&str>,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    match ct {
+        ConnectorType::PostgreSQL => introspect_attached_postgres(conn, alias),
+        ConnectorType::Snowflake => introspect_attached_snowflake(
+            conn,
+            alias,
+            snowflake_database.unwrap_or(""),
+        ),
+        _ => Err(AppError::ConnectorError(
+            "Not a PostgreSQL or Snowflake connector".into(),
+        )),
+    }
 }
 
 fn introspect_attached_db(
@@ -1358,8 +1831,15 @@ pub fn remove_connector(id: String, state: State<'_, AppState>) -> Result<(), Ap
             .ok_or_else(|| AppError::ConnectorError("Connector not found".into()))?
     };
 
+    let secondaries = state
+        .connector_secondary_attaches
+        .lock()
+        .remove(&id)
+        .unwrap_or_default();
+
     let ops = get_ops(&connector.connector_type);
     let conn = state.conn.lock();
+    detach_secondary_attaches(&conn, &secondaries);
     ops.deactivate(&conn, &connector).ok();
     drop(conn);
 
@@ -1368,7 +1848,8 @@ pub fn remove_connector(id: String, state: State<'_, AppState>) -> Result<(), Ap
         sources.retain(|_, ds| ds.connector_id != id);
     }
 
-    state.connector_catalogs.lock().remove(&id);
+    state.connector_catalogs_by_db.lock().remove(&id);
+    state.connector_database_names.lock().remove(&id);
     catalog::save_state_catalog(&state);
 
     Ok(())
@@ -1454,35 +1935,57 @@ pub fn introspect_connector(
             .ok_or_else(|| AppError::ConnectorError("Connector not found".into()))?
     };
 
+    let db_key = catalog_db_key_for_connector(&connector);
     let ops = get_ops(&connector.connector_type);
-    let conn = state.meta_conn.lock();
-    let entries = ops.introspect(&conn, &connector)?;
+    let conn = state.conn.lock();
+    let entries = if matches!(
+        connector.connector_type,
+        ConnectorType::PostgreSQL | ConnectorType::Snowflake
+    ) {
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Database connector missing alias".into()))?;
+        let sf_filter: Option<String> =
+            if matches!(connector.connector_type, ConnectorType::Snowflake) {
+                connector.config.database.as_ref().map(|d| normalize_snowflake_database_name(d))
+            } else {
+                None
+            };
+        let snowflake_db = sf_filter
+            .as_deref()
+            .filter(|s| *s != SINGLE_DB_CATALOG_KEY);
+        introspect_catalog_for_server_alias(
+            connector.connector_type,
+            &conn,
+            alias,
+            snowflake_db,
+        )?
+    } else {
+        ops.introspect(&conn, &connector)?
+    };
     drop(conn);
 
     state
-        .connector_catalogs
+        .connector_catalogs_by_db
         .lock()
-        .insert(id, entries.clone());
+        .entry(id.clone())
+        .or_default()
+        .insert(db_key, entries.clone());
     catalog::save_state_catalog(&state);
 
     Ok(entries)
 }
 
-#[tauri::command]
-pub fn list_pg_databases(
-    config: ConnectorConfig,
-    secret_key: Option<String>,
-    state: State<'_, AppState>,
+fn list_pg_databases_with_config(
+    conn: &Connection,
+    cfg: &ConnectorConfig,
 ) -> Result<Vec<String>, AppError> {
-    let conn = state.meta_conn.lock();
-    ensure_extension(&conn, "postgres")?;
+    ensure_extension(conn, "postgres")?;
 
-    let mut cfg = config;
-    cfg.database = Some("postgres".to_string());
-    if let Some(sk) = secret_key {
-        cfg.password = Some(sk);
-    }
-    let connstr = build_pg_connstr(&cfg)?;
+    let mut c = cfg.clone();
+    c.database = Some("postgres".to_string());
+    let connstr = build_pg_connstr(&c)?;
     let alias = "__cdv_list_dbs__";
 
     conn.execute_batch(&format!(
@@ -1507,11 +2010,305 @@ pub fn list_pg_databases(
     Ok(dbs)
 }
 
+/// Full Snowflake database list (can be slow). Only call with `refresh: true` / explicit refresh.
+fn list_snowflake_databases_deep(conn: &Connection, alias: &str) -> Result<Vec<String>, AppError> {
+    let safe = alias.replace('"', "");
+    let sql = format!(
+        r#"SELECT DISTINCT catalog_name FROM "{}"."INFORMATION_SCHEMA"."SCHEMATA" ORDER BY 1"#,
+        safe
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::ConnectorError(format!("Snowflake list databases failed: {}", e)))?;
+    let dbs: Vec<String> = stmt
+        .query_map(params![], |row| row.get(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    Ok(dbs)
+}
+
+/// List databases for a connector. Cached in `connector_database_names` and persisted.
+/// - `refresh == false` (default): return **cached** list if non-empty; otherwise a **cheap** result
+///   (PostgreSQL: query server; Snowflake: configured default DB only so the UI can render immediately).
+/// - `refresh == true`: re-query the server (Snowflake runs the full INFORMATION_SCHEMA scan).
+#[tauri::command]
+pub fn list_connector_databases(
+    id: String,
+    refresh: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    let connector = {
+        let connectors = state.connectors.lock();
+        connectors
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::ConnectorError("Connector not found".into()))?
+    };
+
+    let refresh = refresh.unwrap_or(false);
+
+    let dbs = match connector.connector_type {
+        ConnectorType::PostgreSQL => {
+            if !refresh {
+                let cached = state
+                    .connector_database_names
+                    .lock()
+                    .get(&id)
+                    .cloned()
+                    .filter(|v| !v.is_empty());
+                if let Some(names) = cached {
+                    return Ok(names);
+                }
+            }
+            let conn = state.conn.lock();
+            list_pg_databases_with_config(&conn, &connector.config)?
+        }
+        ConnectorType::Snowflake => {
+            if !refresh {
+                let cached = state
+                    .connector_database_names
+                    .lock()
+                    .get(&id)
+                    .cloned()
+                    .filter(|v| !v.is_empty());
+                if let Some(names) = cached {
+                    return Ok(names);
+                }
+                let minimal: Vec<String> = connector
+                    .config
+                    .database
+                    .clone()
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| normalize_snowflake_database_name(&s))
+                    .collect();
+                state
+                    .connector_database_names
+                    .lock()
+                    .insert(id.clone(), minimal.clone());
+                catalog::save_state_catalog(&state);
+                return Ok(minimal);
+            }
+            let conn = state.conn.lock();
+            let alias = connector
+                .alias
+                .as_deref()
+                .ok_or_else(|| AppError::ConnectorError("Snowflake connector missing alias".into()))?;
+            let mut v: Vec<String> = list_snowflake_databases_deep(&conn, alias)?
+                .into_iter()
+                .map(|s| normalize_snowflake_database_name(&s))
+                .collect();
+            if let Some(db) = connector.config.database.clone().filter(|s| !s.is_empty()) {
+                let nd = normalize_snowflake_database_name(&db);
+                if !v.iter().any(|x| x == &nd) {
+                    v.push(nd);
+                }
+            }
+            v.sort();
+            v.dedup();
+            if v.is_empty() {
+                if let Some(db) = connector.config.database.clone().filter(|s| !s.is_empty()) {
+                    v.push(normalize_snowflake_database_name(&db));
+                }
+            }
+            v
+        }
+        _ => {
+            return Err(AppError::ConnectorError(
+                "Connector does not support database listing".into(),
+            ));
+        }
+    };
+
+    state
+        .connector_database_names
+        .lock()
+        .insert(id.clone(), dbs.clone());
+    catalog::save_state_catalog(&state);
+
+    Ok(dbs)
+}
+
+#[tauri::command]
+pub fn connect_connector_database(
+    id: String,
+    database: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    let connector = {
+        let connectors = state.connectors.lock();
+        connectors
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::ConnectorError("Connector not found".into()))?
+    };
+
+    if !matches!(
+        connector.connector_type,
+        ConnectorType::PostgreSQL | ConnectorType::Snowflake
+    ) {
+        return Err(AppError::ConnectorError(
+            "Only PostgreSQL and Snowflake support per-database connection".into(),
+        ));
+    }
+
+    let database = if matches!(connector.connector_type, ConnectorType::Snowflake) {
+        normalize_snowflake_database_name(&database)
+    } else {
+        database
+    };
+
+    let default_key = catalog_db_key_for_connector(&connector);
+
+    if database == default_key {
+        let alias = connector
+            .alias
+            .as_deref()
+            .ok_or_else(|| AppError::ConnectorError("Database connector missing alias".into()))?;
+        let conn = state.conn.lock();
+        let snowflake_db = match connector.connector_type {
+            ConnectorType::Snowflake => Some(database.as_str()),
+            _ => None,
+        };
+        let entries = introspect_catalog_for_server_alias(
+            connector.connector_type,
+            &conn,
+            alias,
+            snowflake_db,
+        )?;
+        drop(conn);
+
+        state
+            .connector_catalogs_by_db
+            .lock()
+            .entry(id.clone())
+            .or_default()
+            .insert(default_key, entries.clone());
+        catalog::save_state_catalog(&state);
+        return Ok(entries);
+    }
+
+    let already = state
+        .connector_secondary_attaches
+        .lock()
+        .get(&id)
+        .and_then(|v| v.iter().find(|s| s.database == database).cloned());
+
+    let attach_alias = if let Some(s) = already {
+        s.attach_alias
+    } else {
+        let attach_alias = make_secondary_attach_alias(&connector, &database);
+        let sf_secret = if matches!(connector.connector_type, ConnectorType::Snowflake) {
+            Some(snowflake_secondary_secret_name(&connector, &database))
+        } else {
+            None
+        };
+        {
+            let conn = state.conn.lock();
+            match connector.connector_type {
+                ConnectorType::PostgreSQL => {
+                    attach_postgres_database(&conn, &connector, &database, &attach_alias)?;
+                }
+                ConnectorType::Snowflake => {
+                    let secret_name = sf_secret.as_ref().ok_or_else(|| {
+                        AppError::ConnectorError("Snowflake secondary secret name missing".into())
+                    })?;
+                    drop_secret_if_exists(&conn, secret_name);
+                    let sql = build_snowflake_secret_sql(&connector, &database, secret_name)?;
+                    conn.execute_batch(&sql).map_err(|e| {
+                        AppError::ConnectorError(format!("Failed to create Snowflake secret: {}", e))
+                    })?;
+                    attach_snowflake_with_secret(&conn, &attach_alias, secret_name)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        state
+            .connector_secondary_attaches
+            .lock()
+            .entry(id.clone())
+            .or_default()
+            .push(SecondaryAttach {
+                database: database.clone(),
+                attach_alias: attach_alias.clone(),
+                secret_name: sf_secret,
+            });
+        attach_alias
+    };
+
+    let conn = state.conn.lock();
+    let snowflake_db = match connector.connector_type {
+        ConnectorType::Snowflake => Some(database.as_str()),
+        _ => None,
+    };
+    let entries = introspect_catalog_for_server_alias(
+        connector.connector_type,
+        &conn,
+        &attach_alias,
+        snowflake_db,
+    )?;
+    drop(conn);
+
+    state
+        .connector_catalogs_by_db
+        .lock()
+        .entry(id.clone())
+        .or_default()
+        .insert(database.clone(), entries.clone());
+    catalog::save_state_catalog(&state);
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn list_pg_databases(
+    config: ConnectorConfig,
+    secret_key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    let conn = state.conn.lock();
+    let mut cfg = config;
+    if let Some(sk) = secret_key {
+        cfg.password = Some(sk);
+    }
+    list_pg_databases_with_config(&conn, &cfg)
+}
+
 #[tauri::command]
 pub fn get_cached_catalogs(
     state: State<'_, AppState>,
-) -> Result<std::collections::HashMap<String, Vec<CatalogEntry>>, AppError> {
-    Ok(state.connector_catalogs.lock().clone())
+) -> Result<HashMap<String, ConnectorBrowseCache>, AppError> {
+    let connectors = state.connectors.lock().clone();
+    let by_db = state.connector_catalogs_by_db.lock().clone();
+    let db_names = state.connector_database_names.lock().clone();
+    let secondaries = state.connector_secondary_attaches.lock().clone();
+
+    let mut out = HashMap::new();
+    for (id, c) in connectors.iter() {
+        let mut cache = ConnectorBrowseCache::default();
+        let key = catalog_db_key_for_connector(c);
+        cache.default_database = key.clone();
+        if let Some(m) = by_db.get(id) {
+            cache.catalogs_by_database = m.clone();
+        }
+        if is_multi_database_connector(c) {
+            cache.database_names = db_names.get(id).cloned().unwrap_or_default();
+        }
+        if let Some(base) = c.alias.clone() {
+            cache
+                .attach_aliases_by_database
+                .insert(key.clone(), base);
+        }
+        if let Some(sec) = secondaries.get(id) {
+            for s in sec {
+                cache
+                    .attach_aliases_by_database
+                    .insert(s.database.clone(), s.attach_alias.clone());
+            }
+        }
+        out.insert(id.clone(), cache);
+    }
+    Ok(out)
 }
 
 #[tauri::command]

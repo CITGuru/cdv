@@ -288,6 +288,55 @@ fn default_true() -> bool {
     true
 }
 
+/// Non-default database attached for browse/import; persisted for startup rehydration.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SecondaryAttach {
+    pub database: String,
+    pub attach_alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_name: Option<String>,
+}
+
+/// Catalog bucket key for single-database connectors (SQLite, DuckDB, files, etc.).
+pub const SINGLE_DB_CATALOG_KEY: &str = "_";
+
+/// Inner map key is database name (or [`SINGLE_DB_CATALOG_KEY`] for non-server connectors).
+pub type CatalogByDatabase = HashMap<String, Vec<CatalogEntry>>;
+
+/// Snowflake stores unquoted identifiers uppercased; `INFORMATION_SCHEMA` lists match that.
+/// Using the same normalization for catalog keys and `database_names` keeps the sidebar tree aligned.
+pub fn normalize_snowflake_database_name(db: &str) -> String {
+    let t = db.trim();
+    if t.is_empty() {
+        SINGLE_DB_CATALOG_KEY.to_string()
+    } else {
+        t.to_uppercase()
+    }
+}
+
+pub fn catalog_db_key_for_connector(c: &Connector) -> String {
+    match c.connector_type {
+        ConnectorType::Snowflake => match &c.config.database {
+            Some(s) if !s.trim().is_empty() => normalize_snowflake_database_name(s),
+            _ => SINGLE_DB_CATALOG_KEY.to_string(),
+        },
+        ConnectorType::PostgreSQL => c
+            .config
+            .database
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| SINGLE_DB_CATALOG_KEY.to_string()),
+        _ => SINGLE_DB_CATALOG_KEY.to_string(),
+    }
+}
+
+pub fn is_multi_database_connector(c: &Connector) -> bool {
+    matches!(
+        c.connector_type,
+        ConnectorType::PostgreSQL | ConnectorType::Snowflake
+    )
+}
+
 pub struct AppState {
     /// Primary connection for user queries, DDL, and data operations.
     pub conn: Mutex<Connection>,
@@ -296,7 +345,12 @@ pub struct AppState {
     pub meta_conn: Mutex<Connection>,
     pub data_sources: Mutex<HashMap<String, DataSource>>,
     pub connectors: Mutex<HashMap<String, Connector>>,
-    pub connector_catalogs: Mutex<HashMap<String, Vec<CatalogEntry>>>,
+    /// Per-connector, per-database table/view catalog (default DB + connected secondaries).
+    pub connector_catalogs_by_db: Mutex<HashMap<String, CatalogByDatabase>>,
+    /// Last-fetched database name lists for PostgreSQL / Snowflake.
+    pub connector_database_names: Mutex<HashMap<String, Vec<String>>>,
+    /// Secondary attaches to recreate on startup (Snowflake includes secret per DB).
+    pub connector_secondary_attaches: Mutex<HashMap<String, Vec<SecondaryAttach>>>,
     pub catalog_path: PathBuf,
     pub settings_path: PathBuf,
     #[allow(clippy::type_complexity)]
@@ -325,7 +379,9 @@ impl AppState {
             meta_conn: Mutex::new(meta_conn),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
-            connector_catalogs: Mutex::new(HashMap::new()),
+            connector_catalogs_by_db: Mutex::new(HashMap::new()),
+            connector_database_names: Mutex::new(HashMap::new()),
+            connector_secondary_attaches: Mutex::new(HashMap::new()),
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
@@ -356,7 +412,9 @@ impl AppState {
             meta_conn: Mutex::new(meta_conn),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
-            connector_catalogs: Mutex::new(HashMap::new()),
+            connector_catalogs_by_db: Mutex::new(HashMap::new()),
+            connector_database_names: Mutex::new(HashMap::new()),
+            connector_secondary_attaches: Mutex::new(HashMap::new()),
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),
