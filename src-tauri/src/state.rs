@@ -360,17 +360,17 @@ pub struct AppState {
     pub etl_cancel_flag: Arc<AtomicBool>,
 }
 
+fn try_load_excel_extension(conn: &Connection) {
+    if let Err(e) = conn.execute_batch("INSTALL excel; LOAD excel;") {
+        eprintln!("Excel extension unavailable: {e}");
+    }
+}
+
 impl AppState {
     pub fn new_in_memory() -> Self {
         let conn =
             Connection::open_in_memory().expect("Failed to open DuckDB in-memory connection");
-        conn.execute_batch("INSTALL excel; LOAD excel;")
-            .expect("Failed to load Excel extension");
-        let graph_ok =
-            conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;").is_ok();
-        if !graph_ok {
-            eprintln!("DuckPGQ extension unavailable (in-memory mode)");
-        }
+        try_load_excel_extension(&conn);
         let meta_conn = conn
             .try_clone()
             .expect("Failed to clone DuckDB connection for metadata");
@@ -385,7 +385,7 @@ impl AppState {
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
-            graph_enabled: Mutex::new(graph_ok),
+            graph_enabled: Mutex::new(false),
             etl_jobs: Mutex::new(HashMap::new()),
             etl_cancel_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -400,12 +400,7 @@ impl AppState {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&db_path)?;
-        conn.execute_batch("INSTALL excel; LOAD excel;")?;
-        let graph_ok =
-            conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;").is_ok();
-        if !graph_ok {
-            eprintln!("DuckPGQ extension unavailable");
-        }
+        try_load_excel_extension(&conn);
         let meta_conn = conn.try_clone()?;
         Ok(AppState {
             conn: Mutex::new(conn),
@@ -418,7 +413,7 @@ impl AppState {
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),
-            graph_enabled: Mutex::new(graph_ok),
+            graph_enabled: Mutex::new(false),
             etl_jobs: Mutex::new(HashMap::new()),
             etl_cancel_flag: Arc::new(AtomicBool::new(false)),
         })

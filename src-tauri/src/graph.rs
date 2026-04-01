@@ -76,9 +76,10 @@ pub fn check_graph_support(state: State<'_, AppState>) -> bool {
 #[tauri::command]
 pub fn install_graph_extension(state: State<'_, AppState>) -> Result<(), AppError> {
     let conn = state.conn.lock();
-    conn.execute_batch("INSTALL duckpgq FROM community; LOAD duckpgq;")
+    // Stale cached builds can mismatch bundled DuckDB and crash on LOAD; FORCE INSTALL refreshes.
+    conn.execute_batch("FORCE INSTALL duckpgq FROM community; LOAD duckpgq;")
         .map_err(|e| AppError::GraphError(format!(
-            "Failed to install DuckPGQ extension: {}. Ensure you have an active internet connection.",
+            "Failed to install DuckPGQ: {}. Try again online; if it still fails, remove stale .duckdb_extension files for this app.",
             e
         )))?;
     *state.graph_enabled.lock() = true;
