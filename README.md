@@ -64,27 +64,12 @@ Tauri v2 (Rust) backend, React + TypeScript frontend.
 - Ctrl+Enter to execute
 - Per-tab query state with debounced persistence
 
-### Query Execution
-- Paginated queries wrapped in `LIMIT`/`OFFSET`
-- Streaming mode for large result sets via Tauri events
-- Execution timing in milliseconds
-- Query history (last 20) shown in sidebar with success/error status
-
 ### Data Viewing
 - Virtualized table (`@tanstack/react-table` + `@tanstack/react-virtual`) for smooth scrolling
 - Column sorting and resizing
 - Row numbering
 - Type-aware rendering — NULL shown italic, booleans colored, numbers locale-formatted
 - View modes: First 100, Last 100, All Rows, Filtered Rows
-
-### Pagination
-- Server-side with configurable page size (100 / 500 / 1000)
-- LRU page cache (max 30 entries)
-- First / Prev / Next / Last navigation with total row count
-
-### Schema Panel
-- Collapsible bar showing dataset name, view name, format badge, column count, row count
-- Full schema table with column name, DuckDB type, and nullable status
 
 ### Cloud Connections
 - Create connections to S3, GCS, or Cloudflare R2 with credentials
