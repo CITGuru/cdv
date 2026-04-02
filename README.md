@@ -6,6 +6,8 @@ Under the hood it's DuckDB doing the work: files are registered as views (or opt
 
 Tauri v2 (Rust) backend, React + TypeScript frontend.
 
+![CDV](./assets/cdv.png)
+
 ## Supported Data Formats
 
 ### Input
@@ -131,6 +133,10 @@ bun tauri dev
 ```bash
 bun tauri build
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
