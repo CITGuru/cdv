@@ -86,16 +86,6 @@ Tauri v2 (Rust) backend, React + TypeScript frontend.
 - Multi-tab interface — data tabs (one per source) and query tabs (unlimited)
 - Tab state persisted and restored across restarts
 
-### Graph Analytics (DuckPGQ)
-- Install the DuckPGQ extension from within the app
-- Define property graphs with vertex and edge tables from your data sources
-- Run algorithms: PageRank, local clustering coefficient, weakly connected components
-- Force-directed graph visualization of results
-
-### ETL
-- Create sync jobs from PostgreSQL sources to DuckLake targets
-- Progress tracking and cancellation via Tauri events
-
 ## Tech Stack
 
 - Tauri (React, Tailwind, Rust)
