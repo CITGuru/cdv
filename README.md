@@ -60,6 +60,8 @@ Tauri v2 (Rust) backend, React + TypeScript frontend.
 - Update, reimport, or remove data sources
 - Properties dialog with name, view name, path, format, row count, and full schema
 
+![CDV](./assets/datasource.png)
+
 ### SQL Query Editor
 - Monaco Editor with SQL language mode and dark theme
 - Context-aware autocomplete — table names after `FROM`/`JOIN`, columns after `SELECT`/`WHERE`, dot-notation support
