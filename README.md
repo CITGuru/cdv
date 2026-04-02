@@ -111,24 +111,9 @@ Tauri v2 (Rust) backend, React + TypeScript frontend.
 
 ## Tech Stack
 
-### Backend (Rust)
-
-| Crate | Purpose |
-|----------------------|----------------------------------------------|
-| Tauri v2 | Desktop app framework, IPC, window management |
-| DuckDB (bundled) | Embedded OLAP database |
-| Arrow (IPC) | Columnar data serialization |
-| Tokio | Async runtime |
-
-### Frontend (TypeScript / React)
-
-| Package | Purpose |
-|----------------------------|----------------------------------------------|
-| React | UI framework |
-| Vite | Build tool / dev server |
-| Monaco Editor | SQL code editor |
-| Apache Arrow JS | Decode Arrow IPC buffers from backend |
-
+- Tauri (React, Tailwind, Rust)
+- DuckDB
+- Arrow
 
 ## Application Data (com.cdv.desktop)
 

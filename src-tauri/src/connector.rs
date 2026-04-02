@@ -100,7 +100,7 @@ fn build_snowflake_secret_sql(connector: &Connector, database: &str, secret_name
     }
 
     Ok(format!(
-        "CREATE SECRET \"{}\" ({})",
+        "CREATE PERSISTENT SECRET \"{}\" ({})",
         secret_name,
         secret_parts.join(", ")
     ))
@@ -150,6 +150,7 @@ fn detach_alias(conn: &Connection, alias: &str) {
 
 fn drop_secret_if_exists(conn: &Connection, name: &str) {
     let safe = name.replace('"', "");
+    conn.execute_batch(&format!("DROP PERSISTENT SECRET IF EXISTS \"{}\"", safe)).ok();
     conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", safe)).ok();
 }
 
@@ -471,7 +472,7 @@ fn build_secret_sql(
     };
 
     Ok(format!(
-        "CREATE SECRET \"{}\" ({})",
+        "CREATE PERSISTENT SECRET \"{}\" ({})",
         secret_name,
         parts.join(", ")
     ))
@@ -506,8 +507,7 @@ impl ConnectorOps for CloudOps {
 
     fn deactivate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
         if let Some(secret_name) = &connector.secret_name {
-            conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", secret_name))
-                .map_err(|e| AppError::ConnectorError(e.to_string()))?;
+            drop_secret_if_exists(conn, secret_name);
         }
         Ok(())
     }
@@ -1010,7 +1010,7 @@ impl ConnectorOps for SnowflakeOps {
             }
 
             let secret_sql = format!(
-                "CREATE SECRET \"{}\" ({})",
+                "CREATE PERSISTENT SECRET \"{}\" ({})",
                 secret_name.replace('"', ""),
                 secret_parts.join(", ")
             );
@@ -1054,8 +1054,7 @@ impl ConnectorOps for SnowflakeOps {
                 })?;
         }
         let secret_name = snowflake_secret_name(connector);
-        conn.execute_batch(&format!("DROP SECRET IF EXISTS \"{}\"", secret_name))
-            .map_err(|e| AppError::ConnectorError(e.to_string()))?;
+        drop_secret_if_exists(conn, &secret_name);
         Ok(())
     }
 
