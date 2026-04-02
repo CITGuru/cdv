@@ -1,8 +1,10 @@
 # CDV — Columnar Data Viewer
 
-A desktop data exploration and SQL query tool for flat and columnar file formats. Load local or cloud-hosted data files, inspect schemas, and query everything with SQL — powered by DuckDB as the embedded analytics engine.
+A desktop app for viewing and querying columnar data files — Parquet, Avro, Arrow IPC — alongside CSV, JSON, and Excel. Drop a file in, get a schema and a SQL editor. No server, no setup.
 
-Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between backend and frontend via Apache Arrow IPC for high-performance columnar transport.
+Under the hood it's DuckDB doing the work: files are registered as views (or optionally materialized into tables), and results travel to the frontend as Arrow IPC batches. CDV also connects to PostgreSQL, Snowflake, SQLite, other DuckDB databases, and DuckLake catalogs, so you can pull data from live systems into the same workspace.
+
+Tauri v2 (Rust) backend, React + TypeScript frontend.
 
 ## Supported Data Formats
 
@@ -10,13 +12,14 @@ Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between ba
 
 | Format | Extensions | Engine |
 |------------|-------------------|---------------------------|
+| Parquet | `.parquet` | `read_parquet()` |
+| Avro | `.avro` | `read_avro()` |
+| Arrow IPC | `.arrow`, `.ipc` | Direct reference |
 | CSV | `.csv` | `read_csv_auto()` |
 | TSV | `.tsv` | `read_csv_auto(delim='\t')` |
 | JSON | `.json` | `read_json_auto()` |
 | JSONL | `.jsonl` | `read_json_auto()` |
-| Parquet | `.parquet` | `read_parquet()` |
 | Excel | `.xlsx` | `read_xlsx()` |
-| Arrow IPC | `.arrow`, `.ipc` | Direct reference |
 
 ### Export
 
@@ -33,6 +36,16 @@ Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between ba
 | Amazon S3 (+ compatible) | `s3://` | Access Key + Secret Key, optional endpoint |
 | Google Cloud Storage | `gcs://` | Key ID + Secret |
 | Cloudflare R2 | `s3://` | Account ID + Access Key + Secret Key |
+
+### Database & Lakehouse Connectors
+
+| Connector | How it works |
+|------------|-----------------------------------------------|
+| PostgreSQL | Attaches via ADBC, supports multiple databases |
+| Snowflake | ADBC driver auto-downloaded on first connect |
+| SQLite | Direct attach |
+| DuckDB | Direct attach |
+| DuckLake | Attaches as a DuckLake catalog |
 
 ## Features
 
@@ -85,22 +98,16 @@ Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between ba
 ### Workspace & Tabs
 - Multi-tab interface — data tabs (one per source) and query tabs (unlimited)
 - Tab state persisted and restored across restarts
-- Double-click to rename query tabs
 
-### Sidebar
-- Tree view for data sources with expandable column details and type annotations
-- Format-specific icons (text, JSON, database, spreadsheet, cloud)
-- Right-click context menu: New Query, View Data, Drop, Export, Import, Properties
-- Connections section with provider/bucket tooltips
-- Query History section
-- Resizable (180–480px, width persisted)
+### Graph Analytics (DuckPGQ)
+- Install the DuckPGQ extension from within the app
+- Define property graphs with vertex and edge tables from your data sources
+- Run algorithms: PageRank, local clustering coefficient, weakly connected components
+- Force-directed graph visualization of results
 
-### Settings
-- Sidebar width, default page size, max rows per query
-- Streaming toggle and threshold
-- Default export format
-- Auto-saved to disk
-
+### ETL
+- Create sync jobs from PostgreSQL sources to DuckLake targets
+- Progress tracking and cancellation via Tauri events
 
 ## Tech Stack
 
@@ -109,9 +116,9 @@ Built with Tauri v2 (Rust backend) and React + TypeScript. Data flows between ba
 | Crate | Purpose |
 |----------------------|----------------------------------------------|
 | Tauri v2 | Desktop app framework, IPC, window management |
-| DuckDB v1.4 (bundled)| Embedded OLAP database |
-| Arrow v56 (IPC) | Columnar data serialization |
-| Tokio v1 | Async runtime |
+| DuckDB (bundled) | Embedded OLAP database |
+| Arrow (IPC) | Columnar data serialization |
+| Tokio | Async runtime |
 
 ### Frontend (TypeScript / React)
 
@@ -155,6 +162,6 @@ bun tauri dev
 bun tauri build
 ```
 
-### Recommended IDE Setup
+## License
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+MIT — see [LICENSE](LICENSE).
