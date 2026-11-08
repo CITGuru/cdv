@@ -58,7 +58,7 @@ interface SidebarProps {
   graphSupported: boolean;
   onAddDataSource: () => void;
   onOpenQueryConsole?: () => void;
-  onAddFolder?: () => void;
+  onAddDirectory?: () => void;
   onAddFromUrl?: () => void;
   onCreateGraph?: () => void;
   onDropGraph?: (name: string) => void;
@@ -108,7 +108,7 @@ export function Sidebar({
   graphSupported,
   onAddDataSource,
   onOpenQueryConsole,
-  onAddFolder,
+  onAddDirectory,
   onAddFromUrl,
   onCreateGraph,
   onDropGraph,
@@ -159,7 +159,7 @@ export function Sidebar({
       const type = conn.connector_type;
       if (type === "local_file") {
         return { kind: "file" as const, connector: conn, dataSources: dsForConn };
-      } else if (["sqlite", "duckdb", "postgresql", "snowflake", "ducklake"].includes(type)) {
+      } else if (["sqlite", "duckdb", "postgresql", "snowflake", "ducklake", "directory"].includes(type)) {
         return { kind: "db" as const, connector: conn, dataSources: dsForConn };
       } else {
         return { kind: "cloud" as const, connector: conn, dataSources: dsForConn };
@@ -196,10 +196,10 @@ export function Sidebar({
               <Database className="size-4" />
               Data Source
             </DropdownMenuItem>
-            {onAddFolder && (
-              <DropdownMenuItem onSelect={onAddFolder}>
+            {onAddDirectory && (
+              <DropdownMenuItem onSelect={onAddDirectory}>
                 <FolderOpen className="size-4" />
-                Folder
+                Directory
               </DropdownMenuItem>
             )}
             {onAddFromUrl && (

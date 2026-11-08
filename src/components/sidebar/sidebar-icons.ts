@@ -3,6 +3,7 @@ import {
   FileSpreadsheet,
   FileText,
   FileJson,
+  Folder,
   Table2,
 } from "lucide-react";
 import {
@@ -72,6 +73,8 @@ export function getConnectorIcon(connector: Connector): IconComponent {
       return SnowflakeIcon;
     case "ducklake":
       return DuckDbIcon;
+    case "directory":
+      return Folder;
     case "s3":
       return AmazonS3Icon;
     case "gcs":
@@ -95,6 +98,8 @@ export function getConnectorLabel(connector: Connector): string {
       return "Snowflake";
     case "ducklake":
       return "DuckLake";
+    case "directory":
+      return "Directory";
     case "s3":
       return "S3";
     case "gcs":
@@ -118,6 +123,8 @@ export function getConnectorIconColor(connector: Connector): string {
       return "text-cyan-400";
     case "ducklake":
       return "text-emerald-600";
+    case "directory":
+      return "text-yellow-500";
     case "s3":
       return "text-amber-500";
     case "gcs":

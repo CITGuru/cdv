@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  RefreshCw,
   Rows3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ interface DatasetViewerProps {
   pagination: PaginationState;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
+  onRefresh?: () => void;
 }
 
 export function DatasetViewer({
@@ -38,6 +40,7 @@ export function DatasetViewer({
   pagination,
   onPageChange,
   onPageSizeChange,
+  onRefresh,
 }: DatasetViewerProps) {
   const totalPages = pagination.totalRows
     ? Math.ceil(pagination.totalRows / pagination.pageSize)
@@ -127,11 +130,24 @@ export function DatasetViewer({
           </div>
         </div>
 
-        <div className="flex items-center gap-1">
-          <Rows3 className="size-3" />
-          <span className="tabular-nums">
-            {pagination.totalRows?.toLocaleString() ?? "?"} total rows
-          </span>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            <Rows3 className="size-3" />
+            <span className="tabular-nums">
+              {pagination.totalRows?.toLocaleString() ?? "?"} total rows
+            </span>
+          </div>
+          {onRefresh && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={onRefresh}
+              disabled={loading}
+              title="Refresh data"
+            >
+              <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} />
+            </Button>
+          )}
         </div>
       </div>
     </div>

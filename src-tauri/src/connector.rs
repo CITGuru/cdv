@@ -35,6 +35,7 @@ pub fn get_ops(ct: &ConnectorType) -> Box<dyn ConnectorOps> {
         ConnectorType::Snowflake => Box::new(SnowflakeOps),
         ConnectorType::S3 | ConnectorType::GCS | ConnectorType::R2 => Box::new(CloudOps),
         ConnectorType::DuckLake => Box::new(DuckLakeOps),
+        ConnectorType::Directory => Box::new(DirectoryOps),
     }
 }
 
@@ -393,6 +394,32 @@ impl ConnectorOps for FileOps {
             )));
         }
         Ok(())
+    }
+}
+
+// ──────────────────────────── DirectoryOps ────────────────────────────
+
+pub struct DirectoryOps;
+
+impl ConnectorOps for DirectoryOps {
+    fn activate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        crate::directory_source::activate(conn, connector)
+    }
+
+    fn deactivate(&self, conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        crate::directory_source::deactivate(conn, connector)
+    }
+
+    fn introspect(
+        &self,
+        conn: &Connection,
+        connector: &Connector,
+    ) -> Result<Vec<CatalogEntry>, AppError> {
+        crate::directory_source::refresh(conn, connector)
+    }
+
+    fn test(&self, _conn: &Connection, connector: &Connector) -> Result<(), AppError> {
+        crate::directory_source::test(connector)
     }
 }
 
@@ -1761,6 +1788,7 @@ pub fn add_connector(
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
             | ConnectorType::DuckLake
+            | ConnectorType::Directory
     );
     let alias = if needs_alias {
         Some(sanitize_alias(&name))
@@ -1795,6 +1823,20 @@ pub fn add_connector(
         if let Some(sk) = &secret_key {
             final_config.password = Some(sk.clone());
         }
+    }
+
+    if matches!(connector_type, ConnectorType::Directory) {
+        crate::directory_source::prepare_config(&mut final_config)?;
+        let app_data_dir = state
+            .catalog_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        final_config.metadata_path = Some(
+            crate::directory_source::manifest_path_for(&app_data_dir, &id)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
 
     let connector = Connector {
@@ -1850,6 +1892,13 @@ pub fn remove_connector(id: String, state: State<'_, AppState>) -> Result<(), Ap
     state.connector_catalogs_by_db.lock().remove(&id);
     state.connector_database_names.lock().remove(&id);
     catalog::save_state_catalog(&state);
+    crate::query_worker::reload(&state);
+
+    if matches!(connector.connector_type, ConnectorType::Directory) {
+        if let Some(p) = connector.config.metadata_path.as_deref() {
+            std::fs::remove_file(p).ok();
+        }
+    }
 
     Ok(())
 }
@@ -1890,6 +1939,7 @@ pub fn test_connector(
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
             | ConnectorType::DuckLake
+            | ConnectorType::Directory
     );
     let alias = if needs_alias {
         Some("__cdv_test__".to_string())
@@ -1935,6 +1985,7 @@ pub fn introspect_connector(
     };
 
     let db_key = catalog_db_key_for_connector(&connector);
+    let is_directory = matches!(connector.connector_type, ConnectorType::Directory);
     let ops = get_ops(&connector.connector_type);
     let conn = state.conn.lock();
     let entries = if matches!(
@@ -1972,6 +2023,12 @@ pub fn introspect_connector(
         .or_default()
         .insert(db_key, entries.clone());
     catalog::save_state_catalog(&state);
+
+    // The query worker builds its views once at start. Mark it stale so the
+    // next query restarts it with the views from this scan (manifest above).
+    if is_directory {
+        crate::query_worker::reload(&state);
+    }
 
     Ok(entries)
 }

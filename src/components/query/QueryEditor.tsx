@@ -98,8 +98,8 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
       setSelectionTick((t) => t + 1);
 
       editor.addAction({
-        id: "run-feature",
-        label: "Run feature",
+        id: "run-query",
+        label: "Run Query",
         keybindings: [2048 | 3],
         run: () => {
           const { sqlToRun: text } = resolveSqlToRun(editor, "");
@@ -247,7 +247,7 @@ export function QueryEditor({ initialSql, loading, onExecute, onSqlChange, dataS
           ) : (
             <Play className="size-3.5" />
           )}
-          {loading ? "Running…" : runsSelection ? "Run selection" : "Run feature"}
+          {loading ? "Running…" : runsSelection ? "Run selection" : "Run query"}
         </Button>
       </div>
       <div className="flex-1">

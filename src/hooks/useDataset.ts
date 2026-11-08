@@ -94,12 +94,19 @@ export function useDataset() {
     setLoading(true);
     try {
       const sql = `SELECT * FROM ${ds.qualified_name}`;
+      console.log(
+        `[cdv] selectSource: name="${ds.name}" qualified=${ds.qualified_name} page=${initialPage} pageSize=${initialPageSize}`
+      );
       const ipcData = await runPaginatedQuery(sql, initialPage, initialPageSize);
       const result = decodeArrowIPC(ipcData);
       resultCache.current.set(key, result);
       evictCache();
       setPreviewData(result);
     } catch (e) {
+      console.error(
+        `[cdv] selectSource FAILED for "${ds.name}" (${ds.qualified_name}):`,
+        e
+      );
       setError(extractError(e));
     } finally {
       setLoading(false);
@@ -202,6 +209,31 @@ export function useDataset() {
     }
   }, [activeSource?.id, invalidateCacheForSource]);
 
+  const refetchData = useCallback(
+    async () => {
+      if (!activeSource) return;
+      invalidateCacheForSource(activeSource.id);
+      setError(null);
+      setLoading(true);
+      try {
+        const sql = `SELECT * FROM ${activeSource.qualified_name}`;
+        const ipcData = await runPaginatedQuery(sql, pagination.page, pagination.pageSize);
+        const result = decodeArrowIPC(ipcData);
+        resultCache.current.set(
+          cacheKey(activeSource.id, undefined, pagination.page, pagination.pageSize),
+          result
+        );
+        evictCache();
+        setPreviewData(result);
+      } catch (e) {
+        setError(extractError(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [activeSource, pagination.page, pagination.pageSize, evictCache, invalidateCacheForSource]
+  );
+
   const changePageSize = useCallback(
     async (pageSize: number) => {
       if (!activeSource) return;
@@ -245,6 +277,7 @@ export function useDataset() {
     removeSource,
     updateDataSource,
     refreshSource,
+    refetchData,
     clearSourceView,
     changePage,
     changePageSize,

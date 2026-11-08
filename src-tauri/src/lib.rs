@@ -5,8 +5,10 @@ mod dataset_manager;
 mod error;
 mod etl;
 mod export_service;
+mod directory_source;
 mod graph;
 mod query_engine;
+pub(crate) mod query_worker;
 mod settings;
 mod state;
 mod workspace;
@@ -29,7 +31,7 @@ pub fn run() {
             let settings_path = app_data_dir.join("settings.json");
 
             let state = match state::AppState::new_persistent(
-                db_path,
+                db_path.clone(),
                 catalog_path.clone(),
                 settings_path.clone(),
             ) {
@@ -37,6 +39,7 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("Failed to open persistent DB, using in-memory: {}", e);
                     let mut s = state::AppState::new_in_memory();
+                    s.db_path = db_path;
                     s.catalog_path = catalog_path;
                     s.settings_path = settings_path;
                     s
@@ -79,6 +82,20 @@ pub fn run() {
             *state.connector_secondary_attaches.lock() = cat.connector_secondary_attaches;
             for job in cat.etl_jobs {
                 state.etl_jobs.lock().insert(job.id.clone(), job);
+            }
+
+            // Spawn the isolated query worker process after all connectors
+            // and views have been set up in the main connection.
+            match query_worker::QueryWorker::spawn(
+                state.db_path.clone(),
+                state.catalog_path.clone(),
+            ) {
+                Ok(w) => {
+                    *state.query_worker.lock() = Some(w);
+                }
+                Err(e) => {
+                    eprintln!("Failed to start query worker (will use in-process fallback): {e}");
+                }
             }
 
             app.manage(state);
@@ -132,4 +149,9 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Entry point when the binary is invoked as a query worker subprocess.
+pub fn run_query_worker() {
+    query_worker::worker_main();
 }

@@ -39,7 +39,6 @@ import {
   setPersistedTabs,
   removeDataSource as removeDataSourceIpc,
   createDataSource as createDataSourceIpc,
-  addConnector as addConnectorIpc,
   checkGraphSupport,
   installGraphExtension,
   listPropertyGraphs,
@@ -181,6 +180,9 @@ export function AppLayout() {
         const filtered = workspace.openTabs.filter(
           (t) => t.type === "query" || sourceIds.has(t.dataSourceId)
         );
+        console.log(
+          `[cdv] Startup: ${sources.length} data sources, restoring ${filtered.length} tabs, activeTabId=${workspace.activeTabId}`
+        );
         if (!hasHydratedTabsRef.current) {
           if (filtered.length > 0 || workspace.activeTabId != null) {
             tabs.hydrateTabs(filtered as WorkspaceTab[], workspace.activeTabId);
@@ -227,6 +229,9 @@ export function AppLayout() {
       dataSourceId: activeDataSource.id,
       viewMode: activeDataTab.viewMode,
     };
+    console.log(
+      `[cdv] Auto-previewing data source: "${activeDataSource.name}" id=${activeDataSource.id} qualified=${activeDataSource.qualified_name} viewMode=${activeDataTab.viewMode ?? "default"}`
+    );
     dataset.selectSource(activeDataSource, activeDataTab.viewMode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataTab?.id, activeDataTab?.viewMode, activeDataSource?.id]);
@@ -359,64 +364,23 @@ export function AppLayout() {
     tabs.openQueryTab();
   }, [tabs]);
 
-  const handleAddFolder = useCallback(async () => {
-    const paths = await openDialog({
-      multiple: true,
-      filters: [
-        {
-          name: "Data Files",
-          extensions: [
-            "csv",
-            "tsv",
-            "json",
-            "jsonl",
-            "parquet",
-            "xlsx",
-            "avro",
-            "arrow",
-            "ipc",
-          ],
-        },
-      ],
-    });
-    const pathList = Array.isArray(paths) ? paths : paths ? [paths] : [];
-    if (pathList.length === 0) return;
-    const created: DataSource[] = [];
-    for (const p of pathList) {
-      try {
-        const name = p.split(/[/\\]/).pop() ?? "untitled";
-        const viewName = name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-        const ext = (name.match(/\.([^.]+)$/)?.[1] ?? "").toLowerCase();
-        const formatMap: Record<string, string> = {
-          csv: "csv",
-          tsv: "tsv",
-          json: "json",
-          jsonl: "jsonl",
-          parquet: "parquet",
-          xlsx: "xlsx",
-          avro: "avro",
-          arrow: "arrow_ipc",
-          ipc: "arrow_ipc",
-        };
-        const format = formatMap[ext] ?? "csv";
-        const conn = await addConnectorIpc({
-          name: name,
-          connectorType: "local_file",
-          config: { path: p, format },
-        });
-        const ds = await createDataSourceIpc({
-          name,
-          viewName,
-          connectorId: conn.id,
-        });
-        dataset.addDataSource(ds);
-        created.push(ds);
-      } catch {
-        // skip failed file
-      }
+  const handleAddDirectory = useCallback(async () => {
+    const picked = await openDialog({ directory: true, multiple: false });
+    const root = Array.isArray(picked) ? picked[0] : picked;
+    if (!root) return;
+    const name = root.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || "directory";
+    try {
+      // The backend scans the directory, writes the manifest, and makes one
+      // view per supported file ("<directory>"."<subdirectory>"."<file>").
+      await connectorsHook.addConnector({
+        name,
+        connectorType: "directory",
+        config: { path: root },
+      });
+    } catch (err) {
+      console.error("[cdv] Add directory failed:", err);
     }
-    if (created.length > 0) tabs.openDataTab(created[0]);
-  }, [dataset, tabs]);
+  }, [connectorsHook]);
 
   const handleAddFromUrl = useCallback(() => {
     setShowAddFromUrl(true);
@@ -553,7 +517,7 @@ export function AppLayout() {
           graphSupported={graphSupported}
           onAddDataSource={handleOpenAddSource}
           onOpenQueryConsole={handleOpenQueryConsole}
-          onAddFolder={handleAddFolder}
+          onAddDirectory={handleAddDirectory}
           onAddFromUrl={handleAddFromUrl}
           onCreateGraph={handleCreateGraph}
           onDropGraph={handleDropGraph}
@@ -719,6 +683,7 @@ export function AppLayout() {
               pagination={dataset.pagination}
               onPageChange={dataset.changePage}
               onPageSizeChange={dataset.changePageSize}
+              onRefresh={dataset.refetchData}
             />
           ) : activeQueryTab ? (
             <div className="flex flex-col h-full">

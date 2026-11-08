@@ -14,7 +14,8 @@ export type ConnectorType =
   | "s3"
   | "gcs"
   | "r2"
-  | "ducklake";
+  | "ducklake"
+  | "directory";
 
 export type Driver = "duckdb" | "chdb";
 
@@ -34,6 +35,7 @@ export function supportedDrivers(connectorType: ConnectorType): Driver[] {
     case "postgresql":
     case "snowflake":
     case "ducklake":
+    case "directory":
       return ["duckdb"];
     default:
       return ["duckdb"];
@@ -66,6 +68,8 @@ export interface ConnectorConfig {
   data_path?: string | null;
   /** DuckLake read-only mode */
   read_only?: boolean | null;
+  /** Directory connector: only these files are tables (multiple-file selection). */
+  files?: string[] | null;
 }
 
 export interface Connector {

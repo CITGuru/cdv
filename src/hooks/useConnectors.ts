@@ -24,6 +24,7 @@ const DB_CONNECTOR_TYPES: ConnectorType[] = [
   "postgresql",
   "snowflake",
   "ducklake",
+  "directory",
 ];
 
 function isDbConnector(ct: ConnectorType): boolean {

@@ -225,6 +225,7 @@ pub fn create_data_source(
             | ConnectorType::PostgreSQL
             | ConnectorType::Snowflake
             | ConnectorType::DuckLake
+            | ConnectorType::Directory
     );
 
     if is_db_connector {
@@ -316,6 +317,7 @@ pub fn create_data_source(
         drop(conn);
         state.data_sources.lock().insert(id, data_source.clone());
         catalog::save_state_catalog(&state);
+        crate::query_worker::reload(&state);
 
         return Ok(data_source);
     }
@@ -374,6 +376,7 @@ pub fn create_data_source(
     drop(conn);
     state.data_sources.lock().insert(id, data_source.clone());
     catalog::save_state_catalog(&state);
+    crate::query_worker::reload(&state);
 
     Ok(data_source)
 }
@@ -397,6 +400,7 @@ pub fn remove_data_source(id: String, state: State<'_, AppState>) -> Result<(), 
     }
 
     catalog::save_state_catalog(&state);
+    crate::query_worker::reload(&state);
 
     Ok(())
 }
@@ -505,6 +509,7 @@ pub fn update_data_source(
     let result = ds.clone();
     drop(sources);
     catalog::save_state_catalog(&state);
+    crate::query_worker::reload(&state);
 
     Ok(result)
 }
@@ -604,6 +609,7 @@ pub fn refresh_data_source(id: String, state: State<'_, AppState>) -> Result<Dat
     drop(sources);
 
     catalog::save_state_catalog(&state);
+    crate::query_worker::reload(&state);
 
     Ok(updated)
 }
