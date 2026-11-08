@@ -77,14 +77,11 @@ import {
 
 type AuthMode = "none" | "user_password";
 
-/** Columnar input: one file, a fixed set of files, or a whole directory. */
 type ColumnarMode = "file" | "files" | "directory";
 
 interface FileConnectionFields {
   mode: ColumnarMode;
-  /** Mode "files": absolute paths of the selected files. */
   files: string[];
-  /** Mode "directory": root directory (picked or typed). */
   directory: string;
   path: string;
   pathType: "local" | "url";
@@ -245,10 +242,13 @@ const DATA_FILE_EXTENSIONS = [
   "xlsx", "avro", "arrow", "ipc",
 ];
 
-/** Name of the folder that holds a file ("/a/b/c.csv" -> "b"). */
-function parentDirName(filePath: string): string {
-  const parts = filePath.split(/[/\\]/).filter(Boolean);
-  return parts.length >= 2 ? parts[parts.length - 2] : "files";
+/** Default name for a multiple-files or directory source. */
+function directorySourceName(file: FileConnectionFields): string {
+  if (file.mode === "files") {
+    const parts = (file.files[0] ?? "").split(/[/\\]/).filter(Boolean);
+    return parts.length >= 2 ? parts[parts.length - 2] : "files";
+  }
+  return fileBaseName(file.directory.trim().replace(/[/\\]+$/, ""));
 }
 
 function fileBaseName(filePath: string): string {
@@ -324,7 +324,7 @@ export function AddDataSourceModal({
   const [availablePgDbs, setAvailablePgDbs] = useState<string[]>([]);
   const [listingPgDbs, setListingPgDbs] = useState(false);
   const [pgDbDropdownOpen, setPgDbDropdownOpen] = useState(false);
-  /** Config of the directory connector already made in this modal session. */
+  /** Config of the directory connector already created in this session. */
   const [directoryConfigKey, setDirectoryConfigKey] = useState<string | null>(null);
 
   const cloudConnectors = connectors.filter((c) =>
@@ -506,7 +506,7 @@ export function AddDataSourceModal({
     const merged = Array.from(new Set([...form.getValues("file.files"), ...picked]));
     form.setValue("file.files", merged, { shouldDirty: true });
     if (!(form.getValues("name") ?? "").trim()) {
-      form.setValue("name", parentDirName(merged[0]), { shouldDirty: true });
+      form.setValue("name", directorySourceName(form.getValues("file")), { shouldDirty: true });
     }
   };
 
@@ -524,12 +524,10 @@ export function AddDataSourceModal({
     if (!dir) return;
     form.setValue("file.directory", dir, { shouldDirty: true });
     if (!(form.getValues("name") ?? "").trim()) {
-      form.setValue("name", fileBaseName(dir.replace(/[/\\]+$/, "")), { shouldDirty: true });
+      form.setValue("name", directorySourceName(form.getValues("file")), { shouldDirty: true });
     }
   };
 
-  /** Multiple files or a directory: add a directory connector (one table per
-   *  file), then let the user pick tables to open. */
   const handleCreateDirectorySource = async () => {
     if (!onAddConnector) return;
     const { file } = form.getValues();
@@ -540,11 +538,7 @@ export function AddDataSourceModal({
       setStep("select-tables");
       return;
     }
-    const fallbackName =
-      file.mode === "files"
-        ? parentDirName(file.files[0] ?? "")
-        : fileBaseName(file.directory.trim().replace(/[/\\]+$/, ""));
-    const name = (form.getValues("name") ?? "").trim() || fallbackName || "directory";
+    const name = (form.getValues("name") ?? "").trim() || directorySourceName(file) || "directory";
     setLoading(true);
     setError(null);
     try {
@@ -1181,7 +1175,7 @@ export function AddDataSourceModal({
                   loading ||
                   (sourceType === "columnar" && columnarMode === "file" && !filePath && !(fileUrl ?? "").trim()) ||
                   (sourceType === "columnar" && columnarMode === "files" && pickedFiles.length === 0) ||
-                  (sourceType === "columnar" && columnarMode === "directory" && !(directoryPath ?? "").trim()) ||
+                  (sourceType === "columnar" && columnarMode === "directory" && !directoryPath.trim()) ||
                   (sourceType === "postgresql" && (!dbHost || !dbDatabase)) ||
                   (sourceType === "snowflake" && (!dbHost || !dbDatabase)) ||
                   ((sourceType === "sqlite" || sourceType === "duckdb") && !filePath && !(fileUrl ?? "").trim()) ||
@@ -1299,7 +1293,7 @@ function ColumnarModeTabs({
   );
 }
 
-function MultiFileDropZone({
+function MultiFilePicker({
   onPickFiles,
   loading,
 }: {
@@ -1563,7 +1557,7 @@ function SourceStep({
         {sourceType === "columnar" && columnarMode === "files" && (
           <>
             {pickedFiles.length === 0 ? (
-              <MultiFileDropZone onPickFiles={onPickFiles} loading={loading} />
+              <MultiFilePicker onPickFiles={onPickFiles} loading={loading} />
             ) : (
               <FormRow label="Files:">
                 <div className="space-y-1.5">
@@ -2084,7 +2078,6 @@ function TableSelectStep({
   onToggleTable: (schema: string, name: string) => void;
   onImport: () => void;
   onBack: () => void;
-  /** When set, a "Done" button closes without opening any table. */
   onDone?: () => void;
   creating: boolean;
 }) {

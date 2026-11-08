@@ -161,7 +161,7 @@ fn sanitize_view_name(name: &str) -> String {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_file(
     path: String,
     format: Option<String>,
@@ -218,15 +218,7 @@ pub fn create_data_source(
 
     let conn = state.conn.lock();
 
-    let is_db_connector = matches!(
-        connector.connector_type,
-        ConnectorType::SQLite
-            | ConnectorType::DuckDB
-            | ConnectorType::PostgreSQL
-            | ConnectorType::Snowflake
-            | ConnectorType::DuckLake
-            | ConnectorType::Directory
-    );
+    let is_db_connector = connector.connector_type.is_attached_db();
 
     if is_db_connector {
         let secondaries = state
@@ -422,8 +414,11 @@ pub fn get_schema(
     Ok(ds.schema.clone())
 }
 
-#[tauri::command]
-pub fn get_preview(dataset_id: String, state: State<'_, AppState>) -> Result<Vec<u8>, AppError> {
+#[tauri::command(async)]
+pub fn get_preview(
+    dataset_id: String,
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, AppError> {
     let qualified_name = {
         let sources = state.data_sources.lock();
         let ds = sources.get(&dataset_id).ok_or_else(|| {
@@ -439,10 +434,11 @@ pub fn get_preview(dataset_id: String, state: State<'_, AppState>) -> Result<Vec
     let batches: Vec<RecordBatch> = frames.collect();
 
     if batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(tauri::ipc::Response::new(Vec::new()));
     }
 
     crate::query_engine::batches_to_ipc(&batches[0].schema(), &batches)
+        .map(tauri::ipc::Response::new)
 }
 
 #[tauri::command]

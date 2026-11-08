@@ -85,13 +85,13 @@ export async function getSchema(datasetId: string): Promise<ColumnInfo[]> {
   return invoke("get_schema", { datasetId });
 }
 
-export async function getPreview(datasetId: string): Promise<number[]> {
+export async function getPreview(datasetId: string): Promise<ArrayBuffer> {
   return invoke("get_preview", { datasetId });
 }
 
 // ──── Query engine ────
 
-export async function runQuery(sql: string): Promise<number[]> {
+export async function runQuery(sql: string): Promise<ArrayBuffer> {
   return invoke("run_query", { sql });
 }
 
@@ -99,7 +99,7 @@ export async function runPaginatedQuery(
   sql: string,
   page: number,
   pageSize: number
-): Promise<number[]> {
+): Promise<ArrayBuffer> {
   return invoke("run_paginated_query", { args: { sql, page, pageSize } });
 }
 
@@ -294,7 +294,7 @@ export async function runGraphAlgorithm(
   algorithm: GraphAlgorithm,
   vertexLabel: string,
   edgeLabel: string
-): Promise<number[]> {
+): Promise<ArrayBuffer> {
   return invoke("run_graph_algorithm", { graphName, algorithm, vertexLabel, edgeLabel });
 }
 

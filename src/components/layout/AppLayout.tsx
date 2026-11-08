@@ -180,9 +180,6 @@ export function AppLayout() {
         const filtered = workspace.openTabs.filter(
           (t) => t.type === "query" || sourceIds.has(t.dataSourceId)
         );
-        console.log(
-          `[cdv] Startup: ${sources.length} data sources, restoring ${filtered.length} tabs, activeTabId=${workspace.activeTabId}`
-        );
         if (!hasHydratedTabsRef.current) {
           if (filtered.length > 0 || workspace.activeTabId != null) {
             tabs.hydrateTabs(filtered as WorkspaceTab[], workspace.activeTabId);
@@ -229,9 +226,6 @@ export function AppLayout() {
       dataSourceId: activeDataSource.id,
       viewMode: activeDataTab.viewMode,
     };
-    console.log(
-      `[cdv] Auto-previewing data source: "${activeDataSource.name}" id=${activeDataSource.id} qualified=${activeDataSource.qualified_name} viewMode=${activeDataTab.viewMode ?? "default"}`
-    );
     dataset.selectSource(activeDataSource, activeDataTab.viewMode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataTab?.id, activeDataTab?.viewMode, activeDataSource?.id]);
@@ -370,8 +364,6 @@ export function AppLayout() {
     if (!root) return;
     const name = root.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || "directory";
     try {
-      // The backend scans the directory, writes the manifest, and makes one
-      // view per supported file ("<directory>"."<subdirectory>"."<file>").
       await connectorsHook.addConnector({
         name,
         connectorType: "directory",

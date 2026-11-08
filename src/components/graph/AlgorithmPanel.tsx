@@ -75,7 +75,7 @@ export function AlgorithmPanel({
         vertexLabel,
         edgeLabel
       );
-      if (ipcBytes.length === 0) {
+      if (ipcBytes.byteLength === 0) {
         setResult({ columns: [], rows: [] });
       } else {
         const decoded = decodeArrowIPC(ipcBytes);

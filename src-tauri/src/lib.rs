@@ -2,13 +2,13 @@ mod catalog;
 mod cloud_connector;
 mod connector;
 mod dataset_manager;
+mod directory_source;
 mod error;
 mod etl;
 mod export_service;
-mod directory_source;
 mod graph;
 mod query_engine;
-pub(crate) mod query_worker;
+mod query_worker;
 mod settings;
 mod state;
 mod workspace;
@@ -31,7 +31,7 @@ pub fn run() {
             let settings_path = app_data_dir.join("settings.json");
 
             let state = match state::AppState::new_persistent(
-                db_path.clone(),
+                db_path,
                 catalog_path.clone(),
                 settings_path.clone(),
             ) {
@@ -39,7 +39,6 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("Failed to open persistent DB, using in-memory: {}", e);
                     let mut s = state::AppState::new_in_memory();
-                    s.db_path = db_path;
                     s.catalog_path = catalog_path;
                     s.settings_path = settings_path;
                     s
@@ -84,21 +83,13 @@ pub fn run() {
                 state.etl_jobs.lock().insert(job.id.clone(), job);
             }
 
-            // Spawn the isolated query worker process after all connectors
-            // and views have been set up in the main connection.
-            match query_worker::QueryWorker::spawn(
-                state.db_path.clone(),
-                state.catalog_path.clone(),
-            ) {
-                Ok(w) => {
-                    *state.query_worker.lock() = Some(w);
-                }
-                Err(e) => {
-                    eprintln!("Failed to start query worker (will use in-process fallback): {e}");
-                }
-            }
-
+            // Workers start in the background; queries run in-process until then.
+            let catalog_path = state.catalog_path.clone();
             app.manage(state);
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                handle.state::<state::AppState>().query_workers.start(catalog_path);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -151,7 +142,6 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Entry point when the binary is invoked as a query worker subprocess.
 pub fn run_query_worker() {
     query_worker::worker_main();
 }

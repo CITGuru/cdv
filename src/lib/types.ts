@@ -68,7 +68,7 @@ export interface ConnectorConfig {
   data_path?: string | null;
   /** DuckLake read-only mode */
   read_only?: boolean | null;
-  /** Directory connector: only these files are tables (multiple-file selection). */
+  /** Directory connector: only these files (multiple-file selection). */
   files?: string[] | null;
 }
 

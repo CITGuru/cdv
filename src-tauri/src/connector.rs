@@ -1781,15 +1781,7 @@ pub fn add_connector(
 ) -> Result<Connector, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
 
-    let needs_alias = matches!(
-        connector_type,
-        ConnectorType::SQLite
-            | ConnectorType::DuckDB
-            | ConnectorType::PostgreSQL
-            | ConnectorType::Snowflake
-            | ConnectorType::DuckLake
-            | ConnectorType::Directory
-    );
+    let needs_alias = connector_type.is_attached_db();
     let alias = if needs_alias {
         Some(sanitize_alias(&name))
     } else {
@@ -1932,15 +1924,7 @@ pub fn test_connector(
         }
     }
 
-    let needs_alias = matches!(
-        connector_type,
-        ConnectorType::SQLite
-            | ConnectorType::DuckDB
-            | ConnectorType::PostgreSQL
-            | ConnectorType::Snowflake
-            | ConnectorType::DuckLake
-            | ConnectorType::Directory
-    );
+    let needs_alias = connector_type.is_attached_db();
     let alias = if needs_alias {
         Some("__cdv_test__".to_string())
     } else {
@@ -1971,7 +1955,7 @@ pub fn test_connector(
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn introspect_connector(
     id: String,
     state: State<'_, AppState>,
@@ -1987,7 +1971,8 @@ pub fn introspect_connector(
     let db_key = catalog_db_key_for_connector(&connector);
     let is_directory = matches!(connector.connector_type, ConnectorType::Directory);
     let ops = get_ops(&connector.connector_type);
-    let conn = state.conn.lock();
+    // Describes and counts every table: keep it off the query connection.
+    let conn = state.meta_conn.lock();
     let entries = if matches!(
         connector.connector_type,
         ConnectorType::PostgreSQL | ConnectorType::Snowflake
@@ -2016,18 +2001,23 @@ pub fn introspect_connector(
     };
     drop(conn);
 
-    state
-        .connector_catalogs_by_db
-        .lock()
-        .entry(id.clone())
-        .or_default()
-        .insert(db_key, entries.clone());
-    catalog::save_state_catalog(&state);
-
-    // The query worker builds its views once at start. Mark it stale so the
-    // next query restarts it with the views from this scan (manifest above).
-    if is_directory {
-        crate::query_worker::reload(&state);
+    // The sidebar introspects on every expand; skip work when nothing changed.
+    let changed = {
+        let mut by_db = state.connector_catalogs_by_db.lock();
+        let slot = by_db.entry(id.clone()).or_default();
+        let same = slot.get(&db_key).is_some_and(|old| {
+            serde_json::to_string(old).ok() == serde_json::to_string(&entries).ok()
+        });
+        if !same {
+            slot.insert(db_key, entries.clone());
+        }
+        !same
+    };
+    if changed {
+        catalog::save_state_catalog(&state);
+        if is_directory {
+            crate::query_worker::reload(&state);
+        }
     }
 
     Ok(entries)

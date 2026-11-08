@@ -80,8 +80,7 @@ pub struct ConnectorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
 
-    /// Directory connector: when set, only these files (absolute paths) are
-    /// tables, and `path` is their shared parent folder.
+    /// Directory connector: only these files (absolute paths); `path` is their parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<String>>,
 }
@@ -139,6 +138,19 @@ impl ConnectorType {
             | ConnectorType::Directory => &[Driver::DuckDB],
             ConnectorType::PostgreSQL | ConnectorType::Snowflake => &[Driver::DuckDB],
         }
+    }
+
+    /// Tables are addressed as `"alias"."schema"."table"`.
+    pub fn is_attached_db(&self) -> bool {
+        matches!(
+            self,
+            ConnectorType::SQLite
+                | ConnectorType::DuckDB
+                | ConnectorType::PostgreSQL
+                | ConnectorType::Snowflake
+                | ConnectorType::DuckLake
+                | ConnectorType::Directory
+        )
     }
 
     pub fn default_driver(&self) -> Driver {
@@ -351,9 +363,8 @@ pub struct AppState {
     /// Secondary connection for metadata operations (introspection, test)
     /// so they don't block the primary query path.
     pub meta_conn: Mutex<Connection>,
-    /// Isolated child process for SELECT queries — absorbs DuckDB
-    /// assertion crashes without taking down the main app.
-    pub query_worker: Mutex<Option<crate::query_worker::QueryWorker>>,
+    /// Child processes for SELECT queries, so a DuckDB crash does not kill the app.
+    pub query_workers: crate::query_worker::WorkerPool,
     pub data_sources: Mutex<HashMap<String, DataSource>>,
     pub connectors: Mutex<HashMap<String, Connector>>,
     /// Per-connector, per-database table/view catalog (default DB + connected secondaries).
@@ -362,7 +373,6 @@ pub struct AppState {
     pub connector_database_names: Mutex<HashMap<String, Vec<String>>>,
     /// Secondary attaches to recreate on startup (Snowflake includes secret per DB).
     pub connector_secondary_attaches: Mutex<HashMap<String, Vec<SecondaryAttach>>>,
-    pub db_path: PathBuf,
     pub catalog_path: PathBuf,
     pub settings_path: PathBuf,
     #[allow(clippy::type_complexity)]
@@ -389,13 +399,12 @@ impl AppState {
         AppState {
             conn: Mutex::new(conn),
             meta_conn: Mutex::new(meta_conn),
-            query_worker: Mutex::new(None),
+            query_workers: crate::query_worker::WorkerPool::new(crate::query_worker::POOL_SIZE),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
             connector_catalogs_by_db: Mutex::new(HashMap::new()),
             connector_database_names: Mutex::new(HashMap::new()),
             connector_secondary_attaches: Mutex::new(HashMap::new()),
-            db_path: PathBuf::new(),
             catalog_path: PathBuf::new(),
             settings_path: PathBuf::new(),
             settings_cache: Mutex::new(None),
@@ -419,13 +428,12 @@ impl AppState {
         Ok(AppState {
             conn: Mutex::new(conn),
             meta_conn: Mutex::new(meta_conn),
-            query_worker: Mutex::new(None),
+            query_workers: crate::query_worker::WorkerPool::new(crate::query_worker::POOL_SIZE),
             data_sources: Mutex::new(HashMap::new()),
             connectors: Mutex::new(HashMap::new()),
             connector_catalogs_by_db: Mutex::new(HashMap::new()),
             connector_database_names: Mutex::new(HashMap::new()),
             connector_secondary_attaches: Mutex::new(HashMap::new()),
-            db_path,
             catalog_path,
             settings_path,
             settings_cache: Mutex::new(None),

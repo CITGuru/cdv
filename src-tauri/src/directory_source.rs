@@ -1,22 +1,10 @@
-//! Directory connector: every supported data file under a root directory becomes a
-//! DuckDB view.
+//! Directory connector: each supported file under a root becomes a view
+//! `"<alias>"."<subdir>"."<file>"` (root files go to `main`) in an in-memory
+//! database attached under the connector alias.
 //!
-//! Layout inside DuckDB: the connector attaches an in-memory database under
-//! its alias. Each subdirectory becomes a schema and each file becomes a view in
-//! that schema:
-//!
-//!   <root>/demo_bank/CUSTOMER.parquet  ->  "<alias>"."demo_bank"."customer"
-//!   <root>/truth/events.parquet        ->  "<alias>"."truth"."events"
-//!   <root>/dataset_card.json           ->  "<alias>"."main"."dataset_card"
-//!
-//! A JSON manifest (path in `config.metadata_path`, inside the app data
-//! directory) records every file found by the last scan, with its size, modified
-//! time, schema and row count. Activation (app start, query worker start)
-//! builds views from the manifest without a full rescan. A refresh rescans
-//! the directory and describes again only new or changed files.
-//!
-//! Hive partition directories (`key=value`) are skipped for now. The manifest
-//! `kind` field leaves room to add them later as one table per partition root.
+//! A manifest in the app data dir records each file's size, mtime, columns and
+//! row count. Activation builds views from it without rescanning; a refresh
+//! rescans and describes only new or changed files.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,41 +16,33 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::state::{CatalogEntry, ColumnInfo, Connector};
 
-const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_VERSION: u32 = 2;
 const MAX_DEPTH: usize = 16;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct DirectoryManifest {
-    pub version: u32,
-    pub root: String,
-    /// Unix time in milliseconds of the last scan.
-    pub scanned_at: i64,
-    pub files: Vec<ManifestFile>,
+#[derive(Serialize, Deserialize)]
+struct DirectoryManifest {
+    version: u32,
+    root: String,
+    scanned_at_ms: i64,
+    files: Vec<ManifestFile>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ManifestFile {
-    /// Path relative to the root, with `/` separators.
-    pub path: String,
-    /// "file" for now; "partitioned" is reserved for hive partition roots.
-    #[serde(default = "default_file_kind")]
-    pub kind: String,
-    pub format: String,
-    pub size: u64,
-    pub modified_ms: i64,
-    pub schema: String,
-    pub table: String,
+#[derive(Serialize, Deserialize, Clone)]
+struct ManifestFile {
+    /// Relative to the root, `/`-separated.
+    path: String,
+    format: String,
+    size: u64,
+    modified_ms: i64,
+    schema: String,
+    table: String,
     #[serde(default)]
-    pub columns: Vec<ColumnInfo>,
+    columns: Vec<ColumnInfo>,
     #[serde(default)]
-    pub row_count: Option<u64>,
-    /// Set when the file could not be read; the file then has no view.
+    row_count: Option<u64>,
+    /// Unreadable file: no view is created for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-fn default_file_kind() -> String {
-    "file".to_string()
+    error: Option<String>,
 }
 
 struct ScannedFile {
@@ -71,8 +51,6 @@ struct ScannedFile {
     size: u64,
     modified_ms: i64,
 }
-
-// ─── Scan ──────────────────────────────────────────────────────────
 
 fn ext_to_format(ext: &str) -> Option<&'static str> {
     match ext {
@@ -89,7 +67,7 @@ fn ext_to_format(ext: &str) -> Option<&'static str> {
 }
 
 fn is_ignored_name(name: &str) -> bool {
-    // Hidden files and Spark/Hadoop markers (_SUCCESS, _committed_*, ...).
+    // Hidden files and Spark/Hadoop markers (_SUCCESS, ...).
     name.starts_with('.') || name.starts_with('_')
 }
 
@@ -123,12 +101,12 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<ScannedFile>) {
         if is_ignored_name(&name) {
             continue;
         }
-        // `file_type` does not follow symlinks, so symlink loops are not walked.
+        // `file_type` does not follow symlinks, so there are no loops.
         let Ok(ft) = entry.file_type() else { continue };
         let path = entry.path();
         if ft.is_dir() {
+            // TODO: hive partitions (one table per partition root).
             if is_partition_dir(&name) {
-                // TODO: hive partition support (one table per partition root).
                 continue;
             }
             scan_dir(root, &path, depth + 1, out);
@@ -140,8 +118,6 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<ScannedFile>) {
     }
 }
 
-/// Metadata for one supported file, or None when the format is not
-/// supported or the file cannot be read.
 fn scanned_file(root: &Path, path: &Path) -> Option<ScannedFile> {
     let ext = path
         .extension()
@@ -174,8 +150,7 @@ fn scanned_file(root: &Path, path: &Path) -> Option<ScannedFile> {
     })
 }
 
-/// Only the listed files (multiple-file selection). A refresh never adds
-/// other files from the root. Files that no longer exist are left out.
+/// Multiple-file selection: never picks up other files; missing ones drop out.
 fn scan_listed(root: &Path, files: &[String]) -> Vec<ScannedFile> {
     let mut out: Vec<ScannedFile> = files
         .iter()
@@ -200,7 +175,6 @@ fn scan_source(connector: &Connector, root: &Path) -> Result<Vec<ScannedFile>, A
     }
 }
 
-/// Longest shared parent folder of the given file paths.
 fn common_parent(files: &[String]) -> Option<PathBuf> {
     let mut iter = files.iter().map(|f| Path::new(f).parent().map(Path::to_path_buf));
     let mut common = iter.next()??;
@@ -213,8 +187,7 @@ fn common_parent(files: &[String]) -> Option<PathBuf> {
     Some(common)
 }
 
-/// Check and complete the config of a new directory connector. For a
-/// multiple-file selection, the root becomes the shared parent folder.
+/// Validates a new connector's config and sets `path` for a file selection.
 pub fn prepare_config(config: &mut crate::state::ConnectorConfig) -> Result<(), AppError> {
     if let Some(files) = config.files.as_mut() {
         files.retain(|f| !f.trim().is_empty());
@@ -242,8 +215,6 @@ pub fn prepare_config(config: &mut crate::state::ConnectorConfig) -> Result<(), 
     Ok(())
 }
 
-// ─── Naming ────────────────────────────────────────────────────────
-
 fn sanitize_ident(s: &str) -> String {
     let mapped: String = s
         .chars()
@@ -266,9 +237,8 @@ fn sanitize_ident(s: &str) -> String {
     }
 }
 
-/// Schema and table name for each file, in input order. Root files go to
-/// `main`. Nested directories join with `_` (`a/b/x.csv` -> schema `a_b`).
-/// Name clashes in one schema get the format, then a number, as a suffix.
+/// `(schema, table)` per file. `a/b/x.csv` -> `("a_b", "x")`; clashes get the
+/// format, then a number, as a suffix.
 fn assign_names(files: &[ScannedFile]) -> Vec<(String, String)> {
     let mut used: HashSet<(String, String)> = HashSet::new();
     files
@@ -301,8 +271,6 @@ fn assign_names(files: &[ScannedFile]) -> Vec<(String, String)> {
         .collect()
 }
 
-// ─── Manifest IO ───────────────────────────────────────────────────
-
 pub fn manifest_path_for(app_data_dir: &Path, connector_id: &str) -> PathBuf {
     app_data_dir
         .join("directory_manifests")
@@ -330,8 +298,6 @@ fn save_manifest(path: &Path, m: &DirectoryManifest) -> Result<(), AppError> {
     Ok(())
 }
 
-// ─── DuckDB objects ────────────────────────────────────────────────
-
 fn q(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -349,8 +315,7 @@ fn connector_parts(connector: &Connector) -> Result<(&str, &str), AppError> {
     Ok((root, alias))
 }
 
-/// Drop and attach a fresh in-memory database under `alias`, so that views
-/// for deleted files do not stay behind.
+/// Fresh database, so views of deleted files do not linger.
 fn reset_attach(conn: &Connection, alias: &str) -> Result<(), AppError> {
     conn.execute_batch(&format!("DETACH DATABASE IF EXISTS {}", q(alias)))
         .ok();
@@ -382,13 +347,12 @@ fn manifest_from_scan(root: &str, scanned: &[ScannedFile]) -> DirectoryManifest 
     DirectoryManifest {
         version: MANIFEST_VERSION,
         root: root.to_string(),
-        scanned_at: chrono::Utc::now().timestamp_millis(),
+        scanned_at_ms: chrono::Utc::now().timestamp_millis(),
         files: scanned
             .iter()
             .zip(names)
             .map(|(s, (schema, table))| ManifestFile {
                 path: s.rel_path.clone(),
-                kind: default_file_kind(),
                 format: s.format.clone(),
                 size: s.size,
                 modified_ms: s.modified_ms,
@@ -402,9 +366,8 @@ fn manifest_from_scan(root: &str, scanned: &[ScannedFile]) -> DirectoryManifest 
     }
 }
 
-/// Build the views for a directory connector. Uses the manifest when it is
-/// present and matches the root; otherwise scans the directory (names only, no
-/// describe). Never writes the manifest, so the query worker can call it.
+/// Builds views from the manifest (or a names-only scan). Never writes the
+/// manifest, so query workers can call it too.
 pub fn activate(conn: &Connection, connector: &Connector) -> Result<(), AppError> {
     let (root, alias) = connector_parts(connector)?;
     let manifest = connector
@@ -435,8 +398,6 @@ pub fn deactivate(conn: &Connection, connector: &Connector) -> Result<(), AppErr
     Ok(())
 }
 
-/// Rescan the directory, rebuild all views, describe new or changed files,
-/// write the manifest, and return the catalog for the sidebar tree.
 pub fn refresh(conn: &Connection, connector: &Connector) -> Result<Vec<CatalogEntry>, AppError> {
     let (root, alias) = connector_parts(connector)?;
     let root_path = Path::new(root);
@@ -458,8 +419,8 @@ pub fn refresh(conn: &Connection, connector: &Connector) -> Result<Vec<CatalogEn
         let view_q = match create_view(conn, alias, root_path, f) {
             Ok(v) => v,
             Err(e) => {
+                eprintln!("[directory] skip {}: {}", f.path, e);
                 f.error = Some(e.to_string());
-                eprintln!("[directory] skip {}: {}", f.path, f.error.as_deref().unwrap_or(""));
                 continue;
             }
         };
@@ -629,8 +590,7 @@ mod tests {
         assert_eq!(m.files.len(), 3);
         assert_eq!(m.files.iter().find(|f| f.table == "loans").unwrap().row_count, Some(3));
 
-        // A second connection (like the query worker) builds views from the
-        // manifest alone.
+        // Another connection (like a query worker) needs only the manifest.
         let conn2 = Connection::open_in_memory().unwrap();
         activate(&conn2, &c).unwrap();
         assert_eq!(count(&conn2, "SELECT COUNT(*) FROM lake.bank.customer"), 2);
@@ -684,8 +644,7 @@ mod tests {
         };
         assert_eq!(names(refresh(&conn, &c).unwrap()), vec!["main.customer", "sub.loans"]);
 
-        // New files next to the listed ones do not appear on refresh, and a
-        // deleted listed file drops out.
+        // Unlisted new files stay out; a deleted listed file drops out.
         std::fs::write(dir.join("bank/new.csv"), "id\n1\n").unwrap();
         std::fs::remove_file(&a).unwrap();
         assert_eq!(names(refresh(&conn, &c).unwrap()), vec!["sub.loans"]);
@@ -708,20 +667,5 @@ mod tests {
         };
         prepare_config(&mut cfg).unwrap();
         assert_eq!(cfg.path.as_deref(), Some(tmp.to_string_lossy().trim_end_matches('/')));
-    }
-
-    /// Manual check against a real directory: CDV_DIRECTORY=/path cargo test -- --ignored real_directory --nocapture
-    #[test]
-    #[ignore]
-    fn real_directory() {
-        let root = PathBuf::from(std::env::var("CDV_DIRECTORY").expect("set CDV_DIRECTORY"));
-        let manifest = std::env::temp_dir().join(format!("cdv_manifest_{}.json", uuid::Uuid::new_v4()));
-        let c = directory_connector(&root, &manifest);
-        let conn = Connection::open_in_memory().unwrap();
-        for e in refresh(&conn, &c).unwrap() {
-            println!("{}.{}  cols={} rows={:?}", e.schema.unwrap(), e.name, e.columns.len(), e.row_count);
-        }
-        println!("{}", std::fs::read_to_string(&manifest).unwrap().lines().take(25).collect::<Vec<_>>().join("\n"));
-        std::fs::remove_file(&manifest).ok();
     }
 }

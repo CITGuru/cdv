@@ -1,12 +1,13 @@
 import { tableFromIPC, type Vector } from "apache-arrow";
 import type { QueryResult } from "./types";
 
-export function decodeArrowIPC(buffer: number[]): QueryResult {
-  if (!buffer || buffer.length === 0) {
+/** Commands return an `ArrayBuffer`; event payloads arrive as `number[]`. */
+export function decodeArrowIPC(buffer: ArrayBuffer | number[]): QueryResult {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.byteLength === 0) {
     return { columns: [], rows: [] };
   }
 
-  const bytes = new Uint8Array(buffer);
   const table = tableFromIPC(bytes);
 
   const columns = table.schema.fields.map((f) => f.name);

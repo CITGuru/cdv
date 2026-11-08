@@ -190,14 +190,14 @@ pub fn get_property_graph_info(
     Ok(info)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_graph_algorithm(
     graph_name: String,
     algorithm: String,
     vertex_label: String,
     edge_label: String,
     state: State<'_, AppState>,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<tauri::ipc::Response, AppError> {
     require_graph(&state)?;
 
     let sql = match algorithm.as_str() {
@@ -233,8 +233,8 @@ pub fn run_graph_algorithm(
     };
 
     if batches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(tauri::ipc::Response::new(Vec::new()));
     }
 
-    batches_to_ipc(&batches[0].schema(), &batches)
+    batches_to_ipc(&batches[0].schema(), &batches).map(tauri::ipc::Response::new)
 }

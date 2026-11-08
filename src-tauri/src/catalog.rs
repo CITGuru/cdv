@@ -257,9 +257,12 @@ pub fn save_catalog(path: &Path, catalog: &Catalog) -> Result<(), std::io::Error
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let data = serde_json::to_string_pretty(catalog)
+    let data = serde_json::to_vec(catalog)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, data)
+    // Atomic replace: workers and crashes never see a partial file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
 }
 
 pub fn catalog_from_state(
